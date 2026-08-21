@@ -1,0 +1,18 @@
+Asunto: Producto no corresponde a lo descrito — módulo PN532 recibido no es un PN532
+
+Estimados,
+
+Escribo para reportar un problema con el pedido [número de pedido]: compré un módulo lector NFC/RFID descrito como "PN532 V3, interfaz I2C/SPI/HSU" (placa serigrafiada HW-147C), pero el chip que trae montado no es un PN532.
+
+Verifiqué esto con pruebas directas sobre el chip, sin depender de ninguna librería de terceros:
+
+- En el bus I2C responde en la dirección 0x28, que es la dirección por defecto del MFRC522/FM17522 — el PN532 responde en 0x24, dirección que nunca contestó.
+- El registro de versión (0x37) devuelve 0xB2, firma correspondiente a un clon FM17522E (Fudan Micro), no a silicio NXP PN532.
+- El chip acepta lectura/escritura de registros individuales (le escribí varios valores arbitrarios a un registro y los leyó de vuelta idénticos). Esa arquitectura es propia del MFRC522; un PN532 genuino no tiene registros direccionables, se comunica exclusivamente por tramas de comando, y nunca reproduce un valor escrito de esa forma.
+- Le envié el comando de identificación propio del protocolo PN532 (GetFirmwareVersion) y nunca devolvió el ACK esperado, en ninguna dirección del bus.
+
+Además del chip incorrecto, el módulo no cumple su función básica: usando el driver correcto para el chip que realmente trae (MFRC522/FM17522), con la configuración de radio verificada registro por registro y la antena confirmada activa, el lector nunca logró leer ninguna etiqueta NFC/RFID compatible, probado con varias tarjetas de distinto tamaño de antena y a máxima ganancia del receptor. Todo indica un problema en la etapa de radiofrecuencia del módulo — probablemente porque el circuito de acoplamiento de antena de esta placa fue diseñado para el PN532 original y no para el chip que efectivamente lleva montado.
+
+En resumen: el producto no es el que se anuncia, y adicionalmente no funciona para el uso que se le supone. Solicito [reintegro / reemplazo por un PN532 genuino / lo que corresponda].
+
+Quedo atento a su respuesta.
