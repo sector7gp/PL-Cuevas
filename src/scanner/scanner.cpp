@@ -17,8 +17,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-#define I2C_SDA 6
-#define I2C_SCL 7
+#define I2C_SDA 8
+#define I2C_SCL 9
 
 // Se barre a varias velocidades: un bus con pull-ups debiles o cables largos
 // puede funcionar a 50 kHz y fallar a 400 kHz.
