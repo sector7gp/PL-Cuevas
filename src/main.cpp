@@ -1,10 +1,18 @@
 /*
  * ESP32-S3 DevKit (OLIMEX ESP32-S3-DevKit-Lipo) + 2x PN532 por I2C
- * + DFPlayer Mini por UART1
+ * + DFPlayer Mini por UART1 -- sistema de historias por combinacion
  *
- * Basado directamente en ejemplo_ok.ino, el sketch minimo verificado
- * funcionando contra el PN532 real en este hardware. Misma secuencia de
- * arranque para cada lector, sin nada que toque el bus antes de begin().
+ * Cada uno de los 3 tags fisicos representa un "personaje". Cuando dos
+ * personajes validos quedan presentes a la vez (uno en cada lector, en
+ * cualquier orden), se busca la historia asociada a esa pareja en
+ * /config.json (LittleFS) y se dispara la pista correspondiente por el
+ * DFPlayer. Sacar y volver a poner la misma combinacion la repite -- el
+ * disparo es por flanco: se resetea apenas cualquiera de los dos lectores
+ * queda vacio, no bloquea mientras ambos siguen puestos.
+ *
+ * La tabla de personajes (UID->id) e historias (personajes->pista) vive en
+ * data/config.json, subido aparte con `pio run -t uploadfs`, no compilada en
+ * el firmware -- ver src/config.h.
  *
  * Cada lector va en su propio periferico I2C de hardware (Wire y Wire1): son
  * dos buses fisicamente independientes, no un bus compartido con dos
@@ -35,6 +43,8 @@
 #include <DFRobotDFPlayerMini.h>
 #include <Wire.h>
 
+#include "config.h"
+
 // --- Lector 1: Wire (I2C0) ---------------------------------------------------
 #define SDA_1 8
 #define SCL_1 9
@@ -50,6 +60,18 @@
 // --- DFPlayer Mini: Serial1 (UART1), 9600 baudios ---------------------------
 #define DFPLAYER_RX 18 // ESP recibe  <- TX del DFPlayer
 #define DFPLAYER_TX 17 // ESP transmite -> RX del DFPlayer
+
+// Timeout corto en readPassiveTargetID(): sin esto, la libreria usa
+// timeout=0 ("bloquear para siempre" -- ver Adafruit_PN532.h). Con dos
+// lectores independientes, si el Lector 1 no tiene tag puesto y bloqueara
+// para siempre, el Lector 2 nunca se llegaria a consultar.
+#define TIMEOUT_LECTURA_MS 50
+
+// Lecturas fallidas seguidas antes de considerar que un tag se retiro. Sin
+// este debounce, un fallo de lectura transitorio (el tag sigue puesto pero
+// una lectura puntual no salio bien) se confundiria con un retiro real y
+// reiniciaria el flanco de la historia sin motivo.
+#define FALLOS_PARA_AUSENCIA 3
 
 Adafruit_PN532 pn532_1(IRQ_1, RESET_1, &Wire);
 Adafruit_PN532 pn532_2(IRQ_2, RESET_2, &Wire1);
@@ -77,35 +99,71 @@ static bool lector1_ok = false;
 static bool lector2_ok = false;
 static bool dfPlayer_ok = false;
 
-// Lee un lector si esta activo: imprime el UID y, si hay DFPlayer, reproduce
-// la pista asociada. play(1) reproduce 0001.mp3 en la raiz de la SD,
-// play(2) reproduce 0002.mp3, etc. -- la numeracion de archivos del DFPlayer
-// es la del propio archivo, no un indice arbitrario.
-static void probarLector(Adafruit_PN532 &pn532, bool activo, const char *nombre,
-                         int pista) {
+// Estado de "que personaje hay puesto" por lector, con el debounce de
+// ausencia descripto arriba.
+struct EstadoLector {
+  int personajeId = 0; // 0 = nada detectado / no reconocido
+  uint8_t fallosSeguidos = 0;
+};
+
+static EstadoLector estado1;
+static EstadoLector estado2;
+
+// true mientras la combinacion actual ya disparo su historia. Se resetea en
+// cuanto cualquiera de los dos lectores queda vacio, asi sacar y volver a
+// poner los mismos dos personajes dispara la historia de nuevo.
+static bool comboYaDisparada = false;
+
+// Si un personaje queda solo (el otro lector vacio) mas de este tiempo,
+// suena su audio de "personaje solitario" (pistaSolo en config.json).
+#define TIEMPO_SOLITARIO_MS 10000
+
+static unsigned long soloDesde = 0; // millis() en que quedo solo; 0 = no aplica
+static bool soloYaDisparado = false; // ya sono el audio para este episodio de soledad
+
+static void imprimirUID(const uint8_t *uid, uint8_t len) {
+  for (uint8_t i = 0; i < len; i++) {
+    if (uid[i] < 0x10) {
+      Serial.print("0");
+    }
+    Serial.print(uid[i], HEX);
+    Serial.print(" ");
+  }
+}
+
+// Consulta un lector y actualiza su EstadoLector. No bloquea gracias al
+// timeout corto -- se puede llamar a los dos lectores en cada vuelta de
+// loop() sin que uno le robe tiempo al otro.
+static void actualizarLector(Adafruit_PN532 &pn532, bool activo, EstadoLector &estado,
+                             const char *nombre) {
   if (!activo) {
     return;
   }
+
   uint8_t uid[7] = {0}; // 4 bytes (MIFARE Classic) o 7 (Ultralight/NTAG)
   uint8_t uidLength = 0;
 
-  if (pn532.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength)) {
-    Serial.printf("%s: Tarjeta detectada! UID: ", nombre);
-    for (uint8_t i = 0; i < uidLength; i++) {
-      if (uid[i] < 0x10) {
-        Serial.print("0");
+  if (pn532.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength,
+                                TIMEOUT_LECTURA_MS)) {
+    estado.fallosSeguidos = 0;
+    int id = personajeDeUID(uid, uidLength);
+    if (id != estado.personajeId) {
+      estado.personajeId = id;
+      if (id != 0) {
+        Serial.printf("%s: personaje detectado -> %s\n", nombre, nombreDePersonaje(id));
+      } else {
+        Serial.printf("%s: tag no reconocido, UID: ", nombre);
+        imprimirUID(uid, uidLength);
+        Serial.println();
       }
-      Serial.print(uid[i], HEX);
-      Serial.print(" ");
     }
-    Serial.println();
+    return;
+  }
 
-    if (dfPlayer_ok) {
-      dfPlayer.play(pista);
-      Serial.printf("  -> reproduciendo pista %04d.mp3\n", pista);
-    }
-
-    delay(1000); // no repetir la misma tarjeta decenas de veces
+  estado.fallosSeguidos++;
+  if (estado.fallosSeguidos >= FALLOS_PARA_AUSENCIA && estado.personajeId != 0) {
+    Serial.printf("%s: personaje retirado.\n", nombre);
+    estado.personajeId = 0;
   }
 }
 
@@ -113,6 +171,10 @@ void setup() {
   Serial.begin(115200);
   while (!Serial) {
   }
+  Serial.println("Inicializando sistema de historias...");
+
+  cargarConfiguracion();
+
   Serial.println("Inicializando lectores PN532 por I2C (2 buses independientes)...");
 
   Wire.begin(SDA_1, SCL_1);
@@ -129,14 +191,14 @@ void setup() {
     while (1) {
     }
   }
-  Serial.println("Esperando tarjeta...");
+  Serial.println("Esperando personajes...");
 
   // Serial1 (UART1) para el DFPlayer, independiente de Serial (UART0, el
   // monitor). Igual que los lectores: si no responde, no se cuelga el resto.
   Serial1.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
   if (dfPlayer.begin(Serial1, /*isACK=*/true, /*doReset=*/true)) {
     dfPlayer_ok = true;
-    dfPlayer.volume(15); // 0-30
+    dfPlayer.volume(25); // 0-30
     Serial.println("DFPlayer Mini detectado.");
   } else {
     Serial.println("DFPlayer Mini: no responde por Serial1 (GPIO17/18).");
@@ -144,6 +206,57 @@ void setup() {
 }
 
 void loop() {
-  probarLector(pn532_1, lector1_ok, "Lector 1", 1); // 0001.mp3
-  probarLector(pn532_2, lector2_ok, "Lector 2", 2); // 0002.mp3
+  actualizarLector(pn532_1, lector1_ok, estado1, "Lector 1");
+  actualizarLector(pn532_2, lector2_ok, estado2, "Lector 2");
+
+  bool p1 = (estado1.personajeId != 0);
+  bool p2 = (estado2.personajeId != 0);
+  bool ambosPresentes = p1 && p2;
+  bool exactamenteUno = p1 != p2; // XOR: uno puesto, el otro lector vacio
+
+  if (ambosPresentes && !comboYaDisparada) {
+    int pista = pistaDePersonajes(estado1.personajeId, estado2.personajeId);
+    if (pista != 0) {
+      Serial.printf(">>> Historia: %s + %s -> pista %04d.mp3\n",
+                    nombreDePersonaje(estado1.personajeId),
+                    nombreDePersonaje(estado2.personajeId), pista);
+      if (dfPlayer_ok) {
+        dfPlayer.play(pista);
+      }
+    } else {
+      Serial.printf(">>> %s + %s: combinacion sin historia asociada.\n",
+                    nombreDePersonaje(estado1.personajeId),
+                    nombreDePersonaje(estado2.personajeId));
+    }
+    comboYaDisparada = true;
+  } else if (!ambosPresentes) {
+    comboYaDisparada = false;
+  }
+
+  // Personaje solitario: si pasan TIEMPO_SOLITARIO_MS con exactamente un
+  // lector ocupado, suena su audio de espera. Se resetea (y puede volver a
+  // disparar) apenas deja de haber exactamente uno -- se empareja, o se saca.
+  if (exactamenteUno) {
+    if (soloDesde == 0) {
+      soloDesde = millis();
+      soloYaDisparado = false;
+    } else if (!soloYaDisparado && (millis() - soloDesde >= TIEMPO_SOLITARIO_MS)) {
+      int idSolo = p1 ? estado1.personajeId : estado2.personajeId;
+      int pista = pistaSolitariaDePersonaje(idSolo);
+      if (pista != 0) {
+        Serial.printf(">>> %s solo hace %lu s -> pista %04d.mp3\n", nombreDePersonaje(idSolo),
+                      TIEMPO_SOLITARIO_MS / 1000, pista);
+        if (dfPlayer_ok) {
+          dfPlayer.play(pista);
+        }
+      } else {
+        Serial.printf(">>> %s solo hace %lu s: sin pistaSolo configurada.\n",
+                      nombreDePersonaje(idSolo), TIEMPO_SOLITARIO_MS / 1000);
+      }
+      soloYaDisparado = true;
+    }
+  } else {
+    soloDesde = 0;
+    soloYaDisparado = false;
+  }
 }

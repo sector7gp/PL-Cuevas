@@ -4,18 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Qué es
 
-Firmware para un **ESP32-S3** (placa real: **OLIMEX ESP32-S3-DevKit-Lipo**) que lee
-tarjetas NFC/RFID ISO14443A con **dos módulos PN532** conectados por I2C,
-cada uno en su propio bus de hardware, y vuelca el UID por serie. Controla
-además un **DFPlayer Mini** (reproductor MP3) por un tercer bus, un UART de
-hardware aparte del que usa el monitor de la PC.
+Firmware para un **ESP32-S3** (placa real: **OLIMEX ESP32-S3-DevKit-Lipo**) que
+implementa un sistema de historias por combinación de personajes: dos módulos
+**PN532** por I2C (cada uno en su propio bus de hardware) leen tags NFC que
+representan personajes, y cuando dos personajes válidos quedan presentes a la
+vez (uno por lector, en cualquier orden), dispara la pista de audio asociada a
+esa combinación en un **DFPlayer Mini** por un tercer bus (UART), aparte del
+que usa el monitor de la PC.
 
 ## Comandos
 
 ```bash
+pio run -t uploadfs                # sube data/config.json a LittleFS (solo cuando cambia)
 pio run -t upload -t monitor       # compilar, flashear y monitorear (entorno por defecto)
 pio run -e scanner -t upload -t monitor   # scanner I2C de diagnostico general
 ```
+
+`uploadfs` y `upload` son independientes: cambiar el firmware no toca
+`config.json` en la flash, y viceversa. Hace falta correr `uploadfs` al menos
+una vez, y de nuevo cada vez que cambie `data/config.json`.
 
 No hay tests automatizados: la verificación es flashear y leer el monitor serie.
 
@@ -56,36 +63,77 @@ la serigrafía del módulo concreto).
 
 ## Arquitectura del firmware
 
-[src/main.cpp](src/main.cpp) — inicializa los dos lectores en `setup()` con la
-misma secuencia mínima cada uno (`Wire.begin()` → `pn532.begin()` →
-`getFirmwareVersion()` → `SAMConfig()`), y en `loop()` sondea a ambos de forma
-independiente. Si un lector no aparece, el otro sigue funcionando sin
+[src/main.cpp](src/main.cpp) — inicializa los dos lectores y el DFPlayer en
+`setup()` (misma secuencia mínima por lector: `Wire.begin()` → `pn532.begin()`
+→ `getFirmwareVersion()` → `SAMConfig()`), y en `loop()` sondea a ambos de
+forma independiente con **timeout corto** en `readPassiveTargetID()`
+(`TIMEOUT_LECTURA_MS`, 50 ms). Esto último es obligatorio, no cosmético: sin
+timeout explícito la librería usa `timeout=0`, que significa *bloquear para
+siempre* (`Adafruit_PN532.h`) — con dos lectores independientes, si el Lector 1
+no tiene tag puesto y bloqueara para siempre, el Lector 2 nunca se llegaría a
+consultar. Si un lector no aparece al arrancar, el otro sigue funcionando sin
 bloquearse — nunca hay un `while(1)` que dependa de que los dos estén presentes.
 
 Está basado directamente en [ejemplo_ok.ino](ejemplo_ok/ejemplo_ok.ino): un
 sketch mínimo de un solo lector que sirve como referencia de la secuencia de
-arranque que funciona de forma confiable en este hardware. `main.cpp` replica
-esa misma secuencia para cada uno de los dos lectores, sin ningún acceso al bus
-antes de `begin()`.
+arranque que funciona de forma confiable en este hardware.
+
+[src/config.h](src/config.h) / [src/config.cpp](src/config.cpp) — módulo de
+configuración, separado de `main.cpp` a propósito: monta LittleFS, parsea
+`/config.json` con ArduinoJson y expone tres funciones de consulta
+(`personajeDeUID()`, `pistaDePersonajes()`, `nombreDePersonaje()`). Si LittleFS
+no monta o el JSON falta/está corrupto, no crashea: lo reporta por serie y deja
+las tablas vacías — mismo patrón de degradación prolija que usan los lectores y
+el DFPlayer.
 
 [src/scanner/scanner.cpp](src/scanner/scanner.cpp) — herramienta de diagnóstico
 I2C standalone (sin librería de lector, solo `Wire`), en su propio entorno de
 PlatformIO. Sirve para inspeccionar el bus —barrido de direcciones, niveles
 eléctricos con/sin pull-up— de forma independiente de qué chip esté conectado.
 
-### DFPlayer: mapeo tarjeta → pista
+### Sistema de historias: personaje → combinación → pista
 
-Cada lector dispara una pista fija al detectar una tarjeta (`probarLector()`
-recibe el número de pista como parámetro):
+[data/config.json](data/config.json) vive en **LittleFS**, no compilado en el
+firmware — se sube aparte con `pio run -t uploadfs` y se puede reemplazar sin
+reflashear (preparado para que a futuro un portal web lo edite). Formato:
 
-- **Lector 1** → `dfPlayer.play(1)` → reproduce `0001.mp3`
-- **Lector 2** → `dfPlayer.play(2)` → reproduce `0002.mp3`
+```json
+{
+  "personajes": [
+    { "id": 1, "nombre": "Personaje 1", "uid": "04ABE574C12A81", "pistaSolo": 4 }
+  ],
+  "historias": [
+    { "personajes": [1, 2], "pista": 1 }
+  ]
+}
+```
 
-Los archivos van en la **raíz de la tarjeta SD**, nombrados con 4 dígitos
-(`0001.mp3`, `0002.mp3`, ...) — es la numeración por nombre de archivo del
-propio DFPlayer (`play(int fileNumber)`), no un índice de carpeta. Si el
-DFPlayer no respondió en `setup()` (`dfPlayer_ok == false`), `probarLector()`
-sigue imprimiendo el UID normalmente pero no intenta reproducir nada.
+- `uid` es hex sin separadores, en el mismo orden en que `main.cpp` imprime el
+  UID leído de un tag por serie — copiar y pegar esa salida funciona directo.
+- `pistaSolo` es opcional por personaje: la pista que suena si ese personaje
+  queda puesto sin pareja (ver más abajo). `0` o ausente = sin audio de
+  espera configurado para ese personaje.
+- El **orden no importa**: personaje A en Lector 1 + B en Lector 2 dispara la
+  misma historia que B en Lector 1 + A en Lector 2 (`pistaDePersonajes()`
+  normaliza el par antes de buscarlo).
+- Cada lector mantiene su propio `EstadoLector` (`personajeId` + contador de
+  `fallosSeguidos`) en `main.cpp`. Un tag se considera retirado recién después
+  de `FALLOS_PARA_AUSENCIA` (3) lecturas fallidas seguidas — evita que un fallo
+  de lectura transitorio se confunda con un retiro real.
+- El disparo es **por flanco**: `comboYaDisparada` se pone en `true` la primera
+  vez que ambos lectores tienen personaje válido a la vez, y se resetea en
+  cuanto cualquiera de los dos queda vacío. Sacar y volver a poner la misma
+  combinación **repite** la historia — no hace falta que cambie nada más.
+- Una combinación de personajes que no esté en `historias` no dispara nada;
+  queda logueado por serie (`combinacion sin historia asociada`).
+
+**Personaje solitario**: si queda exactamente un lector ocupado (el otro
+vacío) durante `TIEMPO_SOLITARIO_MS` (10 s), suena el `pistaSolo` de ese
+personaje. Mismo patrón de flanco que la combinación: `soloDesde`/
+`soloYaDisparado` se resetean apenas deja de haber exactamente uno —al
+emparejarse o al sacarlo—, así que sacarlo y volver a ponerlo solo reinicia
+la cuenta de 10 s. Si el segundo personaje llega antes de los 10 s, el timer
+se cancela sin sonar nada y sigue el flujo normal de combinación.
 
 ## Detalle importante: reset del PN532 tras flashear
 
