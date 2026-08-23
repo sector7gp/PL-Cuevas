@@ -1,5 +1,6 @@
 /*
  * ESP32-S3 DevKit (OLIMEX ESP32-S3-DevKit-Lipo) + 2x PN532 por I2C
+ * + DFPlayer Mini por UART1
  *
  * Basado directamente en ejemplo_ok.ino, el sketch minimo verificado
  * funcionando contra el PN532 real en este hardware. Misma secuencia de
@@ -10,13 +11,20 @@
  * direcciones. Los dos chips pueden estar en 0x24 (la fija del PN532) sin
  * colisionar porque nunca comparten lineas.
  *
+ * El ESP32-S3 tiene 3 UART de hardware. UART0 (Serial) sale por el puente
+ * USB-serie de la placa y es el monitor de la PC -- no se toca. El DFPlayer
+ * usa UART1 (Serial1) en pines aparte, un bus totalmente independiente.
+ *
  * Cableado:
- *   Lector 1  VCC -> 3V3   GND -> GND   SDA -> GPIO 8   SCL -> GPIO 9
- *   Lector 2  VCC -> 3V3   GND -> GND   SDA -> GPIO 11  SCL -> GPIO 12
+ *   Lector 1   VCC -> 3V3   GND -> GND   SDA -> GPIO 8   SCL -> GPIO 9
+ *   Lector 2   VCC -> 3V3   GND -> GND   SDA -> GPIO 11  SCL -> GPIO 12
+ *   DFPlayer   VCC -> 5V    GND -> GND   TX  -> GPIO 18  RX  -> GPIO 17
+ *              (TX del DFPlayer al RX del ESP, RX del DFPlayer al TX del ESP
+ *              -- cruzados, como cualquier conexion serie punto a punto)
  *
  * GPIO 5 y 6 en esta placa estan cableados a sensado de bateria LiPo
- * (PWR_SENSE / BAT_SENSE): evitarlos. GPIO 11/12 son MOSI/SCK del header
- * pUEXT opcional -- sin nada soldado por defecto, libres para I2C.
+ * (PWR_SENSE / BAT_SENSE): evitarlos. GPIO 11/12/17/18 son pines del header
+ * pUEXT opcional -- sin nada soldado por defecto, libres para I2C/UART.
  *
  * Cada PN532 debe estar en modo I2C por hardware (DIP switches, jumper, o el
  * mecanismo que use tu placa concreta -- no todas usan el mismo esquema).
@@ -24,6 +32,7 @@
 
 #include <Adafruit_PN532.h>
 #include <Arduino.h>
+#include <DFRobotDFPlayerMini.h>
 #include <Wire.h>
 
 // --- Lector 1: Wire (I2C0) ---------------------------------------------------
@@ -38,8 +47,13 @@
 #define IRQ_2 14
 #define RESET_2 15
 
+// --- DFPlayer Mini: Serial1 (UART1), 9600 baudios ---------------------------
+#define DFPLAYER_RX 18 // ESP recibe  <- TX del DFPlayer
+#define DFPLAYER_TX 17 // ESP transmite -> RX del DFPlayer
+
 Adafruit_PN532 pn532_1(IRQ_1, RESET_1, &Wire);
 Adafruit_PN532 pn532_2(IRQ_2, RESET_2, &Wire1);
+DFRobotDFPlayerMini dfPlayer;
 
 // Inicializa un lector: misma secuencia que ejemplo_ok.ino, sin nada que
 // toque el bus antes de begin(). No cuelga si no aparece -- devuelve false y
@@ -61,9 +75,14 @@ static bool initLector(Adafruit_PN532 &pn532, const char *nombre) {
 
 static bool lector1_ok = false;
 static bool lector2_ok = false;
+static bool dfPlayer_ok = false;
 
-// Lee un lector si esta activo, e imprime el UID con la etiqueta del lector.
-static void probarLector(Adafruit_PN532 &pn532, bool activo, const char *nombre) {
+// Lee un lector si esta activo: imprime el UID y, si hay DFPlayer, reproduce
+// la pista asociada. play(1) reproduce 0001.mp3 en la raiz de la SD,
+// play(2) reproduce 0002.mp3, etc. -- la numeracion de archivos del DFPlayer
+// es la del propio archivo, no un indice arbitrario.
+static void probarLector(Adafruit_PN532 &pn532, bool activo, const char *nombre,
+                         int pista) {
   if (!activo) {
     return;
   }
@@ -80,6 +99,12 @@ static void probarLector(Adafruit_PN532 &pn532, bool activo, const char *nombre)
       Serial.print(" ");
     }
     Serial.println();
+
+    if (dfPlayer_ok) {
+      dfPlayer.play(pista);
+      Serial.printf("  -> reproduciendo pista %04d.mp3\n", pista);
+    }
+
     delay(1000); // no repetir la misma tarjeta decenas de veces
   }
 }
@@ -105,9 +130,20 @@ void setup() {
     }
   }
   Serial.println("Esperando tarjeta...");
+
+  // Serial1 (UART1) para el DFPlayer, independiente de Serial (UART0, el
+  // monitor). Igual que los lectores: si no responde, no se cuelga el resto.
+  Serial1.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
+  if (dfPlayer.begin(Serial1, /*isACK=*/true, /*doReset=*/true)) {
+    dfPlayer_ok = true;
+    dfPlayer.volume(15); // 0-30
+    Serial.println("DFPlayer Mini detectado.");
+  } else {
+    Serial.println("DFPlayer Mini: no responde por Serial1 (GPIO17/18).");
+  }
 }
 
 void loop() {
-  probarLector(pn532_1, lector1_ok, "Lector 1");
-  probarLector(pn532_2, lector2_ok, "Lector 2");
+  probarLector(pn532_1, lector1_ok, "Lector 1", 1); // 0001.mp3
+  probarLector(pn532_2, lector2_ok, "Lector 2", 2); // 0002.mp3
 }

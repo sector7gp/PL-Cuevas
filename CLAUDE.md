@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Firmware para un **ESP32-S3** (placa real: **OLIMEX ESP32-S3-DevKit-Lipo**) que lee
 tarjetas NFC/RFID ISO14443A con **dos módulos PN532** conectados por I2C,
-cada uno en su propio bus de hardware, y vuelca el UID por serie.
+cada uno en su propio bus de hardware, y vuelca el UID por serie. Controla
+además un **DFPlayer Mini** (reproductor MP3) por un tercer bus, un UART de
+hardware aparte del que usa el monitor de la PC.
 
 ## Comandos
 
@@ -26,19 +28,27 @@ porque expone GPIOs con funciones fijas que no son de propósito general:
 - **GPIO 5 y 6** están cableados a sensado de batería LiPo (`PWR_SENSE`,
   `BAT_SENSE`) — tienen un divisor resistivo permanente. No usarlos como I2C ni
   como GPIO libre.
-- La placa designa **GPIO 47/48** como su propio SDA/SCL "oficial", pero
-  cualquier GPIO libre sirve para I2C si se pasa explícito a `Wire.begin()`.
+- La placa designa **GPIO 47/48** como su propio SDA/SCL "oficial", y
+  **GPIO 17/18** como su propio TX1/RX1 "oficial" (disponibles en el conector
+  `pUEXT`) — este proyecto usa 17/18 para el DFPlayer justamente porque son
+  los que la placa ya reserva para un segundo UART, libres de otro uso.
 
 ### Cableado
 
 ```
-Lector 1  VCC->3V3  GND->GND  SDA->GPIO 8   SCL->GPIO 9    (bus Wire,  I2C0)
-Lector 2  VCC->3V3  GND->GND  SDA->GPIO 11  SCL->GPIO 12   (bus Wire1, I2C1)
+Lector 1   VCC->3V3  GND->GND  SDA->GPIO 8   SCL->GPIO 9    (bus Wire,   I2C0)
+Lector 2   VCC->3V3  GND->GND  SDA->GPIO 11  SCL->GPIO 12   (bus Wire1,  I2C1)
+DFPlayer   VCC->5V   GND->GND  TX->GPIO 18   RX->GPIO 17    (bus Serial1, UART1)
 ```
 
 Los dos lectores están en **buses I2C de hardware completamente independientes**
 (el ESP32-S3 tiene dos periféricos I2C). No comparten líneas, así que ambos
 pueden usar la dirección fija del PN532 (`0x24`) sin colisionar.
+
+El ESP32-S3 tiene 3 UART de hardware. **UART0 (`Serial`) es el monitor de la
+PC y no se toca** — el DFPlayer usa **UART1 (`Serial1`)** en pines aparte,
+9600 baudios. El TX del DFPlayer va al RX del ESP y viceversa (cruzados, como
+cualquier conexión serie punto a punto).
 
 Cada PN532 tiene que estar puesto en modo I2C por hardware (DIP switch, jumper,
 o el mecanismo propio de cada placa — no todas usan el mismo esquema, revisar
@@ -62,6 +72,20 @@ antes de `begin()`.
 I2C standalone (sin librería de lector, solo `Wire`), en su propio entorno de
 PlatformIO. Sirve para inspeccionar el bus —barrido de direcciones, niveles
 eléctricos con/sin pull-up— de forma independiente de qué chip esté conectado.
+
+### DFPlayer: mapeo tarjeta → pista
+
+Cada lector dispara una pista fija al detectar una tarjeta (`probarLector()`
+recibe el número de pista como parámetro):
+
+- **Lector 1** → `dfPlayer.play(1)` → reproduce `0001.mp3`
+- **Lector 2** → `dfPlayer.play(2)` → reproduce `0002.mp3`
+
+Los archivos van en la **raíz de la tarjeta SD**, nombrados con 4 dígitos
+(`0001.mp3`, `0002.mp3`, ...) — es la numeración por nombre de archivo del
+propio DFPlayer (`play(int fileNumber)`), no un índice de carpeta. Si el
+DFPlayer no respondió en `setup()` (`dfPlayer_ok == false`), `probarLector()`
+sigue imprimiendo el UID normalmente pero no intenta reproducir nada.
 
 ## Detalle importante: reset del PN532 tras flashear
 
