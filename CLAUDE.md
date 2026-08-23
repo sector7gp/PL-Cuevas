@@ -121,19 +121,36 @@ reflashear (preparado para que a futuro un portal web lo edite). Formato:
   de `FALLOS_PARA_AUSENCIA` (3) lecturas fallidas seguidas — evita que un fallo
   de lectura transitorio se confunda con un retiro real.
 - El disparo es **por flanco**: `comboYaDisparada` se pone en `true` la primera
-  vez que ambos lectores tienen personaje válido a la vez, y se resetea en
-  cuanto cualquiera de los dos queda vacío. Sacar y volver a poner la misma
-  combinación **repite** la historia — no hace falta que cambie nada más.
+  vez que los **dos** lectores tienen un personaje *reconocido* a la vez
+  (`ambosConocidos`), y se resetea en cuanto cualquiera de los dos deja de
+  tenerlo. Sacar y volver a poner la misma combinación **repite** la
+  historia — no hace falta que cambie nada más.
 - Una combinación de personajes que no esté en `historias` no dispara nada;
   queda logueado por serie (`combinacion sin historia asociada`).
+- **Tag no reconocido**: `EstadoLector.personajeId` usa dos sentinelas
+  distintos a propósito — `PERSONAJE_VACIO` (0, nada puesto) y
+  `PERSONAJE_DESCONOCIDO` (-1, hay un tag pero no está en `config.json`). Si
+  los dos casos compartieran el valor `0`, el primer tag desconocido tras
+  bootear no dispararía el aviso (no habría "cambio de estado" que detectar).
+  Un tag desconocido se imprime por serie (`tag NO reconocido, UID: ...`) para
+  poder copiar ese UID y darlo de alta en `config.json`, pero no cuenta como
+  personaje válido para combinaciones (`ambosConocidos` exige id `> 0`).
 
-**Personaje solitario**: si queda exactamente un lector ocupado (el otro
-vacío) durante `TIEMPO_SOLITARIO_MS` (10 s), suena el `pistaSolo` de ese
-personaje. Mismo patrón de flanco que la combinación: `soloDesde`/
-`soloYaDisparado` se resetean apenas deja de haber exactamente uno —al
-emparejarse o al sacarlo—, así que sacarlo y volver a ponerlo solo reinicia
-la cuenta de 10 s. Si el segundo personaje llega antes de los 10 s, el timer
-se cancela sin sonar nada y sigue el flujo normal de combinación.
+**Espera en dos etapas** cuando queda exactamente un lector ocupado
+(reconocido o no —un tag desconocido también cuenta como "hay algo puesto"
+para esto):
+
+1. A los `TIEMPO_ESPERAR_MS` (2 s) suena `PISTA_ESPERAR` (pista `8`): un único
+   audio genérico ("poné el otro personaje"), igual sin importar cuál quedó
+   solo.
+2. Si sigue solo hasta `TIEMPO_SOLITARIO_MS` (10 s totales), suena el
+   `pistaSolo` **específico** de ese personaje (si tiene uno configurado; un
+   tag desconocido no tiene `pistaSolo`, así que no suena nada en esta etapa).
+
+Las dos etapas comparten el mismo flanco: `soloDesde` / `esperarYaDisparado` /
+`soloYaDisparado` se resetean juntos apenas deja de haber exactamente uno
+—se empareja, se saca, o llega un segundo tag—, así que sacar y volver a
+poner el mismo personaje solo reinicia la cuenta desde cero.
 
 ### Audios: por qué `playMp3Folder()` y no `play()`
 

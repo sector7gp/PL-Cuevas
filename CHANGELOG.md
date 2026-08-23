@@ -2,6 +2,26 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [v0.5] - 2026-08-23
+
+### Agregado
+- Espera en dos etapas cuando queda un solo personaje puesto: a los 2 s suena
+  un audio genérico (`PISTA_ESPERAR`, pista 8, "poné el otro personaje"), y si
+  sigue solo hasta los 10 s totales, suena el `pistaSolo` específico de ese
+  personaje. Repone el campo `pistaSolo` por personaje en `config.json` que
+  se había sacado en v0.3.
+
+### Corregido
+- `EstadoLector.personajeId` usaba `0` tanto para "lector vacío" como para
+  "tag presente pero no reconocido", así que el primer tag desconocido tras
+  bootear no disparaba ningún aviso (no había cambio de estado que detectar).
+  Se separan en dos sentinelas (`PERSONAJE_VACIO`=0, `PERSONAJE_DESCONOCIDO`=-1)
+  y ahora un tag no reconocido se imprime por serie de forma confiable, para
+  poder copiar su UID y darlo de alta en `config.json`.
+- El disparo de historia ahora exige que los dos lados sean personajes
+  *reconocidos* (`ambosConocidos`), no solo "algo puesto" — un tag
+  desconocido ya no forma una combinación falsa con un personaje válido.
+
 ## [v0.4] - 2026-08-23
 
 ### Corregido

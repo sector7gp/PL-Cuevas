@@ -2,13 +2,22 @@
  * ESP32-S3 DevKit (OLIMEX ESP32-S3-DevKit-Lipo) + 2x PN532 por I2C
  * + DFPlayer Mini por UART1 -- sistema de historias por combinacion
  *
- * Cada uno de los 3 tags fisicos representa un "personaje". Cuando dos
- * personajes validos quedan presentes a la vez (uno en cada lector, en
- * cualquier orden), se busca la historia asociada a esa pareja en
- * /config.json (LittleFS) y se dispara la pista correspondiente por el
- * DFPlayer. Sacar y volver a poner la misma combinacion la repite -- el
- * disparo es por flanco: se resetea apenas cualquiera de los dos lectores
- * queda vacio, no bloquea mientras ambos siguen puestos.
+ * Cada tag fisico representa un "personaje" (tabla en config.json). Cuando
+ * dos personajes reconocidos quedan presentes a la vez (uno en cada lector,
+ * en cualquier orden), se busca la historia asociada a esa pareja y se
+ * dispara la pista correspondiente por el DFPlayer. Sacar y volver a poner
+ * la misma combinacion la repite -- el disparo es por flanco: se resetea
+ * apenas cualquiera de los dos lectores deja de tener un personaje
+ * reconocido, no bloquea mientras ambos siguen puestos.
+ *
+ * Si un tag no esta en config.json, se imprime su UID por serie (para darlo
+ * de alta) en vez de intentar formar una combinacion con el.
+ *
+ * Si queda un solo lector ocupado (personaje reconocido o no), la espera
+ * tiene dos etapas: a TIEMPO_ESPERAR_MS suena PISTA_ESPERAR (un unico audio
+ * generico, igual sin importar cual personaje quedo solo). Si sigue solo
+ * hasta TIEMPO_SOLITARIO_MS, suena el pistaSolo especifico de ESE personaje
+ * (config.json), si tiene uno configurado.
  *
  * El audio se dispara con playMp3Folder(), no play(): el comando nativo
  * play() del DFPlayer reproduce por posicion FISICA en la tabla FAT de la
@@ -108,9 +117,15 @@ static bool lector2_ok = false;
 static bool dfPlayer_ok = false;
 
 // Estado de "que personaje hay puesto" por lector, con el debounce de
-// ausencia descripto arriba.
+// ausencia descripto abajo. 0 y -1 son sentinelas distintos a proposito: sin
+// esa distincion, "lector vacio" y "tag presente pero no reconocido" son
+// indistinguibles (los dos valdrian 0), y el aviso de "tag no reconocido"
+// nunca se dispara para el primer tag desconocido que aparece tras bootear.
+#define PERSONAJE_VACIO 0
+#define PERSONAJE_DESCONOCIDO -1
+
 struct EstadoLector {
-  int personajeId = 0; // 0 = nada detectado / no reconocido
+  int personajeId = PERSONAJE_VACIO;
   uint8_t fallosSeguidos = 0;
 };
 
@@ -122,12 +137,17 @@ static EstadoLector estado2;
 // poner los mismos dos personajes dispara la historia de nuevo.
 static bool comboYaDisparada = false;
 
-// Si un personaje queda solo (el otro lector vacio) mas de este tiempo,
-// suena su audio de "personaje solitario" (pistaSolo en config.json).
-#define TIEMPO_SOLITARIO_MS 10000
+// Espera en dos etapas cuando queda un solo lector ocupado (personaje
+// reconocido o no): primero un audio generico ("pone el otro personaje"),
+// y si sigue solo mas tiempo, el audio "solitario" especifico de ESE
+// personaje (pistaSolo en config.json -- solo aplica si es reconocido).
+#define TIEMPO_ESPERAR_MS 2000    // dispara PISTA_ESPERAR (generico, cualquiera)
+#define TIEMPO_SOLITARIO_MS 10000 // dispara pistaSolo especifico del personaje
+#define PISTA_ESPERAR 8
 
-static unsigned long soloDesde = 0; // millis() en que quedo solo; 0 = no aplica
-static bool soloYaDisparado = false; // ya sono el audio para este episodio de soledad
+static unsigned long soloDesde = 0;      // millis() en que quedo solo; 0 = no aplica
+static bool esperarYaDisparado = false;  // ya sono el audio generico de espera
+static bool soloYaDisparado = false;     // ya sono el audio especifico de soledad
 
 static void imprimirUID(const uint8_t *uid, uint8_t len) {
   for (uint8_t i = 0; i < len; i++) {
@@ -155,23 +175,24 @@ static void actualizarLector(Adafruit_PN532 &pn532, bool activo, EstadoLector &e
                                 TIMEOUT_LECTURA_MS)) {
     estado.fallosSeguidos = 0;
     int id = personajeDeUID(uid, uidLength);
-    if (id != estado.personajeId) {
-      estado.personajeId = id;
+    int nuevoEstado = (id != 0) ? id : PERSONAJE_DESCONOCIDO;
+    if (nuevoEstado != estado.personajeId) {
+      estado.personajeId = nuevoEstado;
       if (id != 0) {
         Serial.printf("%s: personaje detectado -> %s\n", nombre, nombreDePersonaje(id));
       } else {
-        Serial.printf("%s: tag no reconocido, UID: ", nombre);
+        Serial.printf("%s: tag NO reconocido, UID: ", nombre);
         imprimirUID(uid, uidLength);
-        Serial.println();
+        Serial.println("  (agregalo a config.json para darlo de alta)");
       }
     }
     return;
   }
 
   estado.fallosSeguidos++;
-  if (estado.fallosSeguidos >= FALLOS_PARA_AUSENCIA && estado.personajeId != 0) {
+  if (estado.fallosSeguidos >= FALLOS_PARA_AUSENCIA && estado.personajeId != PERSONAJE_VACIO) {
     Serial.printf("%s: personaje retirado.\n", nombre);
-    estado.personajeId = 0;
+    estado.personajeId = PERSONAJE_VACIO;
   }
 }
 
@@ -217,12 +238,19 @@ void loop() {
   actualizarLector(pn532_1, lector1_ok, estado1, "Lector 1");
   actualizarLector(pn532_2, lector2_ok, estado2, "Lector 2");
 
-  bool p1 = (estado1.personajeId != 0);
-  bool p2 = (estado2.personajeId != 0);
-  bool ambosPresentes = p1 && p2;
-  bool exactamenteUno = p1 != p2; // XOR: uno puesto, el otro lector vacio
+  bool p1Vacio = (estado1.personajeId == PERSONAJE_VACIO);
+  bool p2Vacio = (estado2.personajeId == PERSONAJE_VACIO);
+  bool p1Conocido = (estado1.personajeId > 0);
+  bool p2Conocido = (estado2.personajeId > 0);
 
-  if (ambosPresentes && !comboYaDisparada) {
+  // Solo dispara historia si los DOS lados son personajes reconocidos -- un
+  // tag no reconocido no forma combinacion valida con nada.
+  bool ambosConocidos = p1Conocido && p2Conocido;
+  // Para el timer de "esperando al otro" cuenta cualquier cosa puesta, sea
+  // reconocida o no -- fisicamente hay algo en ese lector de todos modos.
+  bool exactamenteUnoPresente = (!p1Vacio) != (!p2Vacio); // XOR
+
+  if (ambosConocidos && !comboYaDisparada) {
     int pista = pistaDePersonajes(estado1.personajeId, estado2.personajeId);
     if (pista != 0) {
       Serial.printf(">>> Historia: %s + %s -> pista %04d (/mp3/)\n",
@@ -237,34 +265,51 @@ void loop() {
                     nombreDePersonaje(estado2.personajeId));
     }
     comboYaDisparada = true;
-  } else if (!ambosPresentes) {
+  } else if (!ambosConocidos) {
     comboYaDisparada = false;
   }
 
-  // Personaje solitario: si pasan TIEMPO_SOLITARIO_MS con exactamente un
-  // lector ocupado, suena su audio de espera. Se resetea (y puede volver a
-  // disparar) apenas deja de haber exactamente uno -- se empareja, o se saca.
-  if (exactamenteUno) {
+  // Espera en dos etapas cuando queda exactamente un lector ocupado
+  // (reconocido o no). A TIEMPO_ESPERAR_MS suena PISTA_ESPERAR (generico,
+  // igual para cualquiera). Si sigue solo hasta TIEMPO_SOLITARIO_MS, suena
+  // el pistaSolo especifico de ESE personaje (si tiene uno configurado). Las
+  // dos etapas se resetean juntas apenas deja de haber exactamente uno --
+  // se empareja, se saca, o llega un segundo tag.
+  if (exactamenteUnoPresente) {
     if (soloDesde == 0) {
       soloDesde = millis();
+      esperarYaDisparado = false;
       soloYaDisparado = false;
-    } else if (!soloYaDisparado && (millis() - soloDesde >= TIEMPO_SOLITARIO_MS)) {
-      int idSolo = p1 ? estado1.personajeId : estado2.personajeId;
+    }
+    unsigned long transcurrido = millis() - soloDesde;
+
+    if (!esperarYaDisparado && transcurrido >= TIEMPO_ESPERAR_MS) {
+      Serial.printf(">>> Solo hace %lu s -> pista %04d (/mp3/) [generico]\n",
+                    TIEMPO_ESPERAR_MS / 1000, PISTA_ESPERAR);
+      if (dfPlayer_ok) {
+        dfPlayer.playMp3Folder(PISTA_ESPERAR);
+      }
+      esperarYaDisparado = true;
+    }
+
+    if (!soloYaDisparado && transcurrido >= TIEMPO_SOLITARIO_MS) {
+      int idSolo = p1Vacio ? estado2.personajeId : estado1.personajeId;
       int pista = pistaSolitariaDePersonaje(idSolo);
       if (pista != 0) {
-        Serial.printf(">>> %s solo hace %lu s -> pista %04d (/mp3/)\n", nombreDePersonaje(idSolo),
-                      TIEMPO_SOLITARIO_MS / 1000, pista);
+        Serial.printf(">>> %s sigue solo hace %lu s -> pista %04d (/mp3/)\n",
+                      nombreDePersonaje(idSolo), TIEMPO_SOLITARIO_MS / 1000, pista);
         if (dfPlayer_ok) {
           dfPlayer.playMp3Folder(pista);
         }
       } else {
-        Serial.printf(">>> %s solo hace %lu s: sin pistaSolo configurada.\n",
+        Serial.printf(">>> %s sigue solo hace %lu s: sin pistaSolo configurada.\n",
                       nombreDePersonaje(idSolo), TIEMPO_SOLITARIO_MS / 1000);
       }
       soloYaDisparado = true;
     }
   } else {
     soloDesde = 0;
+    esperarYaDisparado = false;
     soloYaDisparado = false;
   }
 }

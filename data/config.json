@@ -1,8 +1,9 @@
 {
   "personajes": [
-    { "id": 1, "nombre": "Personaje 1", "uid": "04ABE574C12A81", "pistaSolo": 1 },
-    { "id": 2, "nombre": "Personaje 2", "uid": "04B7E574C12A81", "pistaSolo": 2 },
-    { "id": 3, "nombre": "Personaje 3", "uid": "04ACE574C12A81", "pistaSolo": 5 }
+    { "id": 1, "nombre": "Stich", "uid": "04ABE574C12A81", "pistaSolo": 1 },
+    { "id": 2, "nombre": "Angel", "uid": "04B7E574C12A81", "pistaSolo": 2 },
+    { "id": 3, "nombre": "Tucan", "uid": "04ACE574C12A81", "pistaSolo": 5 },
+    { "id": 4, "nombre": "Capibara", "uid": "04ADE574C12A81", "pistaSolo": 7 }
   ],
   "historias": [
     { "personajes": [1, 2], "pista": 3 },

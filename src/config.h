@@ -25,9 +25,9 @@ int personajeDeUID(const uint8_t *uid, uint8_t len);
 // combinacion no esta definida en historias.
 int pistaDePersonajes(int idA, int idB);
 
-// Pista del audio "personaje solitario" (cuando un personaje esta puesto sin
-// pareja durante TIEMPO_SOLITARIO_MS). Devuelve 0 si el personaje no tiene
-// pistaSolo configurada.
+// Pista del audio "personaje solitario" especifico de ese personaje (segunda
+// etapa de la espera, mas larga que el audio generico). Devuelve 0 si el
+// personaje no tiene pistaSolo configurada en config.json.
 int pistaSolitariaDePersonaje(int id);
 
 // Nombre legible de un personaje por id, para los mensajes de serie.
