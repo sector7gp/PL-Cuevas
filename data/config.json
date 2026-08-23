@@ -5,8 +5,8 @@
     { "id": 3, "nombre": "Personaje 3", "uid": "04ACE574C12A81", "pistaSolo": 5 }
   ],
   "historias": [
-    { "personajes": [1, 2], "pista": 2 },
-    { "personajes": [1, 3], "pista": 4 },
-    { "personajes": [2, 3], "pista": 3 }
+    { "personajes": [1, 2], "pista": 3 },
+    { "personajes": [1, 3], "pista": 6 },
+    { "personajes": [2, 3], "pista": 4 }
   ]
 }

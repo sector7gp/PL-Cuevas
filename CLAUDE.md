@@ -135,6 +135,28 @@ emparejarse o al sacarlo—, así que sacarlo y volver a ponerlo solo reinicia
 la cuenta de 10 s. Si el segundo personaje llega antes de los 10 s, el timer
 se cancela sin sonar nada y sigue el flujo normal de combinación.
 
+### Audios: por qué `playMp3Folder()` y no `play()`
+
+El firmware dispara pistas con `dfPlayer.playMp3Folder(pista)`, **no** con
+`dfPlayer.play(pista)`. No es intercambiable — son dos comandos distintos del
+chip del DFPlayer:
+
+- `play(n)` (comando `0x03`) reproduce el archivo número *n* según **su
+  posición física en la tabla FAT de la SD** (el orden en que quedó escrito),
+  no según el número en el nombre. Si los mp3 no se copiaron a la tarjeta en
+  orden numérico estricto —muy fácil que pase con un arrastre en lote—,
+  `play(1)` puede terminar sonando cualquier otro archivo. Así se descubrió
+  este problema: el log decía "pista 0001" y sonaba `0003.mp3`.
+- `playMp3Folder(n)` (comando `0x12`) sí busca por el número **en el nombre
+  del archivo**, inmune al orden físico de copiado.
+
+**Requisito de la SD para `playMp3Folder()`**: los audios van en una carpeta
+`/mp3/` en la raíz de la tarjeta (no sueltos en la raíz), nombrados con 4
+dígitos al principio — `0001xxx.mp3`, `0002xxx.mp3`, etc. (el resto del
+nombre después del número es libre). El número de cada archivo tiene que
+coincidir con la `pista` que le asignaste a esa historia/`pistaSolo` en
+`config.json`.
+
 ## Detalle importante: reset del PN532 tras flashear
 
 El firmware **no controla el pin de reset físico del PN532** (`RSTPD_N`/`RST_OUT`)

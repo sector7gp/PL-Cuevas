@@ -2,6 +2,17 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [v0.4] - 2026-08-23
+
+### Corregido
+- El firmware disparaba audio con `dfPlayer.play(pista)`, que reproduce por
+  **posición física en la tabla FAT de la SD**, no por el número en el nombre
+  del archivo — si los mp3 no se copiaron en orden numérico estricto, sonaba
+  un archivo distinto al pedido (el log decía "pista 0001" y sonaba
+  `0003.mp3`). Cambiado a `dfPlayer.playMp3Folder(pista)`, que sí busca por el
+  número del nombre del archivo. Requiere que los audios estén en una carpeta
+  `/mp3/` en la raíz de la SD, nombrados `0001xxx.mp3`, `0002xxx.mp3`, etc.
+
 ## [v0.3] - 2026-08-23
 
 ### Agregado

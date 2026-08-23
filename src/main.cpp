@@ -10,6 +10,14 @@
  * disparo es por flanco: se resetea apenas cualquiera de los dos lectores
  * queda vacio, no bloquea mientras ambos siguen puestos.
  *
+ * El audio se dispara con playMp3Folder(), no play(): el comando nativo
+ * play() del DFPlayer reproduce por posicion FISICA en la tabla FAT de la
+ * SD, no por el numero en el nombre del archivo -- si los mp3 no se
+ * copiaron en orden numerico estricto, play(1) puede sonar cualquier
+ * archivo. playMp3Folder() si busca por el numero del nombre, pero exige
+ * que los archivos esten en una carpeta /mp3/ en la raiz de la SD,
+ * nombrados con 4 digitos al principio (0001xxx.mp3, 0002xxx.mp3, ...).
+ *
  * La tabla de personajes (UID->id) e historias (personajes->pista) vive en
  * data/config.json, subido aparte con `pio run -t uploadfs`, no compilada en
  * el firmware -- ver src/config.h.
@@ -217,11 +225,11 @@ void loop() {
   if (ambosPresentes && !comboYaDisparada) {
     int pista = pistaDePersonajes(estado1.personajeId, estado2.personajeId);
     if (pista != 0) {
-      Serial.printf(">>> Historia: %s + %s -> pista %04d.mp3\n",
+      Serial.printf(">>> Historia: %s + %s -> pista %04d (/mp3/)\n",
                     nombreDePersonaje(estado1.personajeId),
                     nombreDePersonaje(estado2.personajeId), pista);
       if (dfPlayer_ok) {
-        dfPlayer.play(pista);
+        dfPlayer.playMp3Folder(pista);
       }
     } else {
       Serial.printf(">>> %s + %s: combinacion sin historia asociada.\n",
@@ -244,10 +252,10 @@ void loop() {
       int idSolo = p1 ? estado1.personajeId : estado2.personajeId;
       int pista = pistaSolitariaDePersonaje(idSolo);
       if (pista != 0) {
-        Serial.printf(">>> %s solo hace %lu s -> pista %04d.mp3\n", nombreDePersonaje(idSolo),
+        Serial.printf(">>> %s solo hace %lu s -> pista %04d (/mp3/)\n", nombreDePersonaje(idSolo),
                       TIEMPO_SOLITARIO_MS / 1000, pista);
         if (dfPlayer_ok) {
-          dfPlayer.play(pista);
+          dfPlayer.playMp3Folder(pista);
         }
       } else {
         Serial.printf(">>> %s solo hace %lu s: sin pistaSolo configurada.\n",
