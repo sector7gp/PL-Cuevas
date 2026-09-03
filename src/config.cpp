@@ -3,6 +3,8 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 
+#include "log.h"
+
 #define MAX_PERSONAJES 8
 #define MAX_HISTORIAS 16
 
@@ -38,34 +40,16 @@ static uint8_t parsearUIDHex(const char *hex, uint8_t *out, uint8_t maxLen) {
   return len;
 }
 
-bool cargarConfiguracion() {
+// Vuelca un JsonDocument ya parseado a las tablas en memoria. Compartido
+// entre cargarConfiguracion() (lee de LittleFS) y guardarConfiguracionJSON()
+// (recibe el JSON del portal web) para no duplicar la logica de parseo.
+static void cargarDesdeDoc(JsonDocument &doc) {
   numPersonajes = 0;
   numHistorias = 0;
 
-  // format=true: si la particion nunca se formateo para LittleFS, la
-  // inicializa en vez de fallar. Solo pasa la primera vez.
-  if (!LittleFS.begin(true)) {
-    Serial.println("Config: no se pudo montar LittleFS.");
-    return false;
-  }
-
-  File f = LittleFS.open("/config.json", "r");
-  if (!f) {
-    Serial.println("Config: /config.json no existe. Subilo con 'pio run -t uploadfs'.");
-    return false;
-  }
-
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, f);
-  f.close();
-  if (err) {
-    Serial.printf("Config: error parseando /config.json: %s\n", err.c_str());
-    return false;
-  }
-
   for (JsonObject p : doc["personajes"].as<JsonArray>()) {
     if (numPersonajes >= MAX_PERSONAJES) {
-      Serial.println("Config: mas personajes de los que soporta MAX_PERSONAJES, se ignoran el resto.");
+      logln("Config: mas personajes de los que soporta MAX_PERSONAJES, se ignoran el resto.");
       break;
     }
     Personaje &pj = personajes[numPersonajes];
@@ -79,12 +63,12 @@ bool cargarConfiguracion() {
 
   for (JsonObject h : doc["historias"].as<JsonArray>()) {
     if (numHistorias >= MAX_HISTORIAS) {
-      Serial.println("Config: mas historias de las que soporta MAX_HISTORIAS, se ignoran el resto.");
+      logln("Config: mas historias de las que soporta MAX_HISTORIAS, se ignoran el resto.");
       break;
     }
     JsonArray par = h["personajes"].as<JsonArray>();
     if (par.size() != 2) {
-      Serial.println("Config: entrada de 'historias' sin exactamente 2 personajes, se ignora.");
+      logln("Config: entrada de 'historias' sin exactamente 2 personajes, se ignora.");
       continue;
     }
     int a = par[0].as<int>();
@@ -96,7 +80,52 @@ bool cargarConfiguracion() {
     numHistorias++;
   }
 
-  Serial.printf("Config: %u personajes, %u historias cargadas.\n", numPersonajes, numHistorias);
+  logf("Config: %u personajes, %u historias cargadas.", numPersonajes, numHistorias);
+}
+
+bool cargarConfiguracion() {
+  // format=true: si la particion nunca se formateo para LittleFS, la
+  // inicializa en vez de fallar. Solo pasa la primera vez.
+  if (!LittleFS.begin(true)) {
+    logln("Config: no se pudo montar LittleFS.");
+    return false;
+  }
+
+  File f = LittleFS.open("/config.json", "r");
+  if (!f) {
+    logln("Config: /config.json no existe. Subilo con 'pio run -t uploadfs'.");
+    return false;
+  }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) {
+    logf("Config: error parseando /config.json: %s", err.c_str());
+    return false;
+  }
+
+  cargarDesdeDoc(doc);
+  return true;
+}
+
+bool guardarConfiguracionJSON(const String &json) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, json);
+  if (err) {
+    logf("Config: JSON invalido, no se guarda: %s", err.c_str());
+    return false;
+  }
+
+  File f = LittleFS.open("/config.json", "w");
+  if (!f) {
+    logln("Config: no se pudo abrir /config.json para escribir.");
+    return false;
+  }
+  f.print(json);
+  f.close();
+
+  cargarDesdeDoc(doc);
   return true;
 }
 

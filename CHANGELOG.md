@@ -2,6 +2,36 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [v0.6] - 2026-09-03
+
+### Agregado
+- Portal web de monitoreo y configuración, servido desde un **Access Point
+  propio** del ESP32 (SSID `Cueva1`, sin depender de un router externo) con
+  **mDNS** (`cueva1.local` por defecto) y apagado automático a los 5 minutos
+  del boot (`PORTAL_TIMEOUT_MS`).
+  - Modal **Personajes/Historias**: lee y escribe `config.json` en caliente
+    desde el navegador (`GET/POST /api/config`), sin reflashear ni tocar
+    `uploadfs`. `guardarConfiguracionJSON()` valida el JSON antes de
+    escribirlo.
+  - Modal **Ajustes**: hostname y volumen del DFPlayer
+    (`GET/POST /api/settings`, nuevo `data/settings.json`). Guardar aplica
+    el volumen al instante y reinicia el mDNS si cambió el hostname.
+  - Monitoreo de actividad en vivo (`GET /api/log`), alimentado por un logger
+    compartido (`src/log.h`/`.cpp`) que espeja cada línea al monitor serie y
+    a un buffer circular en RAM — reemplaza todos los `Serial.print*` del
+    firmware por `logf()`/`logln()`.
+  - UI en `data/www/index.html` (LittleFS, sin dependencias externas — el AP
+    no tiene salida a internet).
+- `src/settings.h`/`.cpp`: carga/guarda `hostname` y `volumen` en
+  `/settings.json`, con degradación a valores por defecto si falta o está
+  corrupto.
+
+### Cambiado
+- Pines del DFPlayer (UART1) cruzados por conveniencia de layout del PCB:
+  `DFPLAYER_RX` pasa de GPIO18 a GPIO17, `DFPLAYER_TX` de GPIO17 a GPIO18.
+- Pines I2C del Lector 2 cruzados por el mismo motivo: `SDA_2` pasa de
+  GPIO11 a GPIO12, `SCL_2` de GPIO12 a GPIO11.
+
 ## [v0.5] - 2026-08-23
 
 ### Agregado

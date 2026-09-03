@@ -1,6 +1,7 @@
 /*
  * ESP32-S3 DevKit (OLIMEX ESP32-S3-DevKit-Lipo) + 2x PN532 por I2C
  * + DFPlayer Mini por UART1 -- sistema de historias por combinacion
+ * + portal web de monitoreo/configuracion (AP propio, ver src/portal.h)
  *
  * Cada tag fisico representa un "personaje" (tabla en config.json). Cuando
  * dos personajes reconocidos quedan presentes a la vez (uno en cada lector,
@@ -10,8 +11,8 @@
  * apenas cualquiera de los dos lectores deja de tener un personaje
  * reconocido, no bloquea mientras ambos siguen puestos.
  *
- * Si un tag no esta en config.json, se imprime su UID por serie (para darlo
- * de alta) en vez de intentar formar una combinacion con el.
+ * Si un tag no esta en config.json, se imprime su UID por serie/portal (para
+ * darlo de alta) en vez de intentar formar una combinacion con el.
  *
  * Si queda un solo lector ocupado (personaje reconocido o no), la espera
  * tiene dos etapas: a TIEMPO_ESPERAR_MS suena PISTA_ESPERAR (un unico audio
@@ -29,7 +30,13 @@
  *
  * La tabla de personajes (UID->id) e historias (personajes->pista) vive en
  * data/config.json, subido aparte con `pio run -t uploadfs`, no compilada en
- * el firmware -- ver src/config.h.
+ * el firmware -- ver src/config.h. El portal web (src/portal.h) sirve una UI
+ * en /www/index.html (misma carpeta data/, mismo uploadfs) para editarla sin
+ * SSH ni recompilar, mas un modal de ajustes (hostname/volumen, en
+ * settings.json via src/settings.h) y un monitor de actividad en vivo que
+ * lee del mismo buffer que usa el logger (src/log.h) para el monitor serie.
+ * El portal corre en un Access Point propio (ver src/portal.cpp) y se apaga
+ * solo a los 5 minutos del boot.
  *
  * Cada lector va en su propio periferico I2C de hardware (Wire y Wire1): son
  * dos buses fisicamente independientes, no un bus compartido con dos
@@ -42,10 +49,15 @@
  *
  * Cableado:
  *   Lector 1   VCC -> 3V3   GND -> GND   SDA -> GPIO 8   SCL -> GPIO 9
- *   Lector 2   VCC -> 3V3   GND -> GND   SDA -> GPIO 11  SCL -> GPIO 12
- *   DFPlayer   VCC -> 5V    GND -> GND   TX  -> GPIO 18  RX  -> GPIO 17
+ *   Lector 2   VCC -> 3V3   GND -> GND   SDA -> GPIO 12  SCL -> GPIO 11
+ *   DFPlayer   VCC -> 5V    GND -> GND   TX  -> GPIO 17  RX  -> GPIO 18
  *              (TX del DFPlayer al RX del ESP, RX del DFPlayer al TX del ESP
- *              -- cruzados, como cualquier conexion serie punto a punto)
+ *              -- cruzados, como cualquier conexion serie punto a punto.
+ *              Nota: la placa designa GPIO17/18 como su TX1/RX1 "oficial";
+ *              aca van al reves -- 17 es RX del ESP, 18 es TX -- porque
+ *              conviene asi en el PCB. Sigue siendo UART1/Serial1 igual: el
+ *              ESP32 mapea los pines de UART por matriz de software, no por
+ *              asignacion fija de hardware.)
  *
  * GPIO 5 y 6 en esta placa estan cableados a sensado de bateria LiPo
  * (PWR_SENSE / BAT_SENSE): evitarlos. GPIO 11/12/17/18 son pines del header
@@ -61,6 +73,9 @@
 #include <Wire.h>
 
 #include "config.h"
+#include "log.h"
+#include "portal.h"
+#include "settings.h"
 
 // --- Lector 1: Wire (I2C0) ---------------------------------------------------
 #define SDA_1 8
@@ -69,14 +84,14 @@
 #define RESET_1 5
 
 // --- Lector 2: Wire1 (I2C1) --------------------------------------------------
-#define SDA_2 11
-#define SCL_2 12
+#define SCL_2 11
+#define SDA_2 12
 #define IRQ_2 14
 #define RESET_2 15
 
 // --- DFPlayer Mini: Serial1 (UART1), 9600 baudios ---------------------------
-#define DFPLAYER_RX 18 // ESP recibe  <- TX del DFPlayer
-#define DFPLAYER_TX 17 // ESP transmite -> RX del DFPlayer
+#define DFPLAYER_RX 17 // ESP recibe  <- TX del DFPlayer
+#define DFPLAYER_TX 18 // ESP transmite -> RX del DFPlayer
 
 // Timeout corto en readPassiveTargetID(): sin esto, la libreria usa
 // timeout=0 ("bloquear para siempre" -- ver Adafruit_PN532.h). Con dos
@@ -101,12 +116,12 @@ static bool initLector(Adafruit_PN532 &pn532, const char *nombre) {
   pn532.begin();
   uint32_t versiondata = pn532.getFirmwareVersion();
   if (!versiondata) {
-    Serial.printf("%s: no se encuentra el PN532 en el bus.\n", nombre);
+    logf("%s: no se encuentra el PN532 en el bus.", nombre);
     return false;
   }
 
-  Serial.printf("%s: Chip PN532 detectado. Firmware v%d.%d\n", nombre,
-                (int)((versiondata >> 16) & 0xFF), (int)((versiondata >> 8) & 0xFF));
+  logf("%s: Chip PN532 detectado. Firmware v%d.%d", nombre, (int)((versiondata >> 16) & 0xFF),
+       (int)((versiondata >> 8) & 0xFF));
 
   pn532.SAMConfig();
   return true;
@@ -133,8 +148,9 @@ static EstadoLector estado1;
 static EstadoLector estado2;
 
 // true mientras la combinacion actual ya disparo su historia. Se resetea en
-// cuanto cualquiera de los dos lectores queda vacio, asi sacar y volver a
-// poner los mismos dos personajes dispara la historia de nuevo.
+// cuanto cualquiera de los dos lectores deja de tener un personaje
+// reconocido, asi sacar y volver a poner los mismos dos personajes dispara
+// la historia de nuevo.
 static bool comboYaDisparada = false;
 
 // Espera en dos etapas cuando queda un solo lector ocupado (personaje
@@ -145,17 +161,17 @@ static bool comboYaDisparada = false;
 #define TIEMPO_SOLITARIO_MS 10000 // dispara pistaSolo especifico del personaje
 #define PISTA_ESPERAR 8
 
-static unsigned long soloDesde = 0;      // millis() en que quedo solo; 0 = no aplica
-static bool esperarYaDisparado = false;  // ya sono el audio generico de espera
-static bool soloYaDisparado = false;     // ya sono el audio especifico de soledad
+static unsigned long soloDesde = 0;     // millis() en que quedo solo; 0 = no aplica
+static bool esperarYaDisparado = false; // ya sono el audio generico de espera
+static bool soloYaDisparado = false;    // ya sono el audio especifico de soledad
 
-static void imprimirUID(const uint8_t *uid, uint8_t len) {
-  for (uint8_t i = 0; i < len; i++) {
-    if (uid[i] < 0x10) {
-      Serial.print("0");
-    }
-    Serial.print(uid[i], HEX);
-    Serial.print(" ");
+// Construye la representacion hex del UID en un buffer propio -- a
+// diferencia de Serial.print() encadenado, logf() necesita la linea
+// completa de una sola vez para poder guardarla en el buffer circular.
+static void formatearUID(const uint8_t *uid, uint8_t len, char *out, size_t outLen) {
+  size_t pos = 0;
+  for (uint8_t i = 0; i < len && pos + 3 < outLen; i++) {
+    pos += snprintf(out + pos, outLen - pos, "%02X ", uid[i]);
   }
 }
 
@@ -179,11 +195,11 @@ static void actualizarLector(Adafruit_PN532 &pn532, bool activo, EstadoLector &e
     if (nuevoEstado != estado.personajeId) {
       estado.personajeId = nuevoEstado;
       if (id != 0) {
-        Serial.printf("%s: personaje detectado -> %s\n", nombre, nombreDePersonaje(id));
+        logf("%s: personaje detectado -> %s", nombre, nombreDePersonaje(id));
       } else {
-        Serial.printf("%s: tag NO reconocido, UID: ", nombre);
-        imprimirUID(uid, uidLength);
-        Serial.println("  (agregalo a config.json para darlo de alta)");
+        char uidTexto[32];
+        formatearUID(uid, uidLength, uidTexto, sizeof(uidTexto));
+        logf("%s: tag NO reconocido, UID: %s(agregalo a config.json)", nombre, uidTexto);
       }
     }
     return;
@@ -191,8 +207,16 @@ static void actualizarLector(Adafruit_PN532 &pn532, bool activo, EstadoLector &e
 
   estado.fallosSeguidos++;
   if (estado.fallosSeguidos >= FALLOS_PARA_AUSENCIA && estado.personajeId != PERSONAJE_VACIO) {
-    Serial.printf("%s: personaje retirado.\n", nombre);
+    logf("%s: personaje retirado.", nombre);
     estado.personajeId = PERSONAJE_VACIO;
+  }
+}
+
+// Puente hacia el portal: le permite aplicar un volumen nuevo al DFPlayer
+// sin que src/portal.cpp tenga que incluir la libreria del DFPlayer.
+static void aplicarVolumen(uint8_t v) {
+  if (dfPlayer_ok) {
+    dfPlayer.volume(v);
   }
 }
 
@@ -200,11 +224,12 @@ void setup() {
   Serial.begin(115200);
   while (!Serial) {
   }
-  Serial.println("Inicializando sistema de historias...");
+  logln("Inicializando sistema de historias...");
 
   cargarConfiguracion();
+  Settings settings = cargarSettings();
 
-  Serial.println("Inicializando lectores PN532 por I2C (2 buses independientes)...");
+  logln("Inicializando lectores PN532 por I2C (2 buses independientes)...");
 
   Wire.begin(SDA_1, SCL_1);
   Wire.setTimeOut(100);
@@ -215,26 +240,30 @@ void setup() {
   lector2_ok = initLector(pn532_2, "Lector 2");
 
   if (!lector1_ok && !lector2_ok) {
-    Serial.println("Ningun lector encontrado. Revisa alimentacion, cableado");
-    Serial.println("SDA/SCL y el modo I2C de cada modulo.");
+    logln("Ningun lector encontrado. Revisa alimentacion, cableado SDA/SCL y");
+    logln("el modo I2C de cada modulo.");
     while (1) {
     }
   }
-  Serial.println("Esperando personajes...");
+  logln("Esperando personajes...");
 
   // Serial1 (UART1) para el DFPlayer, independiente de Serial (UART0, el
   // monitor). Igual que los lectores: si no responde, no se cuelga el resto.
   Serial1.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
   if (dfPlayer.begin(Serial1, /*isACK=*/true, /*doReset=*/true)) {
     dfPlayer_ok = true;
-    dfPlayer.volume(25); // 0-30
-    Serial.println("DFPlayer Mini detectado.");
+    dfPlayer.volume(settings.volumen); // 0-30, valor de settings.json
+    logf("DFPlayer Mini detectado. Volumen %u/30.", settings.volumen);
   } else {
-    Serial.println("DFPlayer Mini: no responde por Serial1 (GPIO17/18).");
+    logln("DFPlayer Mini: no responde por Serial1 (GPIO17/18).");
   }
+
+  iniciarPortal(aplicarVolumen);
 }
 
 void loop() {
+  actualizarPortal();
+
   actualizarLector(pn532_1, lector1_ok, estado1, "Lector 1");
   actualizarLector(pn532_2, lector2_ok, estado2, "Lector 2");
 
@@ -253,16 +282,14 @@ void loop() {
   if (ambosConocidos && !comboYaDisparada) {
     int pista = pistaDePersonajes(estado1.personajeId, estado2.personajeId);
     if (pista != 0) {
-      Serial.printf(">>> Historia: %s + %s -> pista %04d (/mp3/)\n",
-                    nombreDePersonaje(estado1.personajeId),
-                    nombreDePersonaje(estado2.personajeId), pista);
+      logf(">>> Historia: %s + %s -> pista %04d (/mp3/)", nombreDePersonaje(estado1.personajeId),
+           nombreDePersonaje(estado2.personajeId), pista);
       if (dfPlayer_ok) {
         dfPlayer.playMp3Folder(pista);
       }
     } else {
-      Serial.printf(">>> %s + %s: combinacion sin historia asociada.\n",
-                    nombreDePersonaje(estado1.personajeId),
-                    nombreDePersonaje(estado2.personajeId));
+      logf(">>> %s + %s: combinacion sin historia asociada.", nombreDePersonaje(estado1.personajeId),
+           nombreDePersonaje(estado2.personajeId));
     }
     comboYaDisparada = true;
   } else if (!ambosConocidos) {
@@ -284,8 +311,8 @@ void loop() {
     unsigned long transcurrido = millis() - soloDesde;
 
     if (!esperarYaDisparado && transcurrido >= TIEMPO_ESPERAR_MS) {
-      Serial.printf(">>> Solo hace %lu s -> pista %04d (/mp3/) [generico]\n",
-                    TIEMPO_ESPERAR_MS / 1000, PISTA_ESPERAR);
+      logf(">>> Solo hace %lu s -> pista %04d (/mp3/) [generico]", TIEMPO_ESPERAR_MS / 1000,
+           PISTA_ESPERAR);
       if (dfPlayer_ok) {
         dfPlayer.playMp3Folder(PISTA_ESPERAR);
       }
@@ -296,14 +323,14 @@ void loop() {
       int idSolo = p1Vacio ? estado2.personajeId : estado1.personajeId;
       int pista = pistaSolitariaDePersonaje(idSolo);
       if (pista != 0) {
-        Serial.printf(">>> %s sigue solo hace %lu s -> pista %04d (/mp3/)\n",
-                      nombreDePersonaje(idSolo), TIEMPO_SOLITARIO_MS / 1000, pista);
+        logf(">>> %s sigue solo hace %lu s -> pista %04d (/mp3/)", nombreDePersonaje(idSolo),
+             TIEMPO_SOLITARIO_MS / 1000, pista);
         if (dfPlayer_ok) {
           dfPlayer.playMp3Folder(pista);
         }
       } else {
-        Serial.printf(">>> %s sigue solo hace %lu s: sin pistaSolo configurada.\n",
-                      nombreDePersonaje(idSolo), TIEMPO_SOLITARIO_MS / 1000);
+        logf(">>> %s sigue solo hace %lu s: sin pistaSolo configurada.", nombreDePersonaje(idSolo),
+             TIEMPO_SOLITARIO_MS / 1000);
       }
       soloYaDisparado = true;
     }

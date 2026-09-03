@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cueva1 — Panel</title>
+<style>
+  :root {
+    --bg: #14161b;
+    --panel: #1e2128;
+    --borde: #2c303a;
+    --texto: #e6e6e6;
+    --tenue: #8a8f9c;
+    --acento: #6aa6ff;
+    --ok: #4caf7d;
+    --error: #e0665a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--texto);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  h1 {
+    font-size: 1.3rem;
+    margin: 0 0 4px;
+  }
+  .subtitulo {
+    color: var(--tenue);
+    font-size: 0.85rem;
+    margin-bottom: 16px;
+  }
+  .barra {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  button {
+    background: var(--panel);
+    color: var(--texto);
+    border: 1px solid var(--borde);
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  button:hover { border-color: var(--acento); }
+  button.primario {
+    background: var(--acento);
+    border-color: var(--acento);
+    color: #0a0a0a;
+    font-weight: 600;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--borde);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  #log {
+    height: 60vh;
+    overflow-y: auto;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+  }
+  dialog {
+    background: var(--panel);
+    color: var(--texto);
+    border: 1px solid var(--borde);
+    border-radius: 10px;
+    padding: 20px;
+    width: min(560px, 92vw);
+  }
+  dialog::backdrop { background: rgba(0,0,0,0.6); }
+  dialog h2 {
+    margin-top: 0;
+    font-size: 1.05rem;
+  }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--tenue);
+    margin: 12px 0 4px;
+  }
+  input[type=text], input[type=number] {
+    width: 100%;
+    background: var(--bg);
+    color: var(--texto);
+    border: 1px solid var(--borde);
+    border-radius: 6px;
+    padding: 8px;
+    font-size: 0.95rem;
+  }
+  textarea {
+    width: 100%;
+    height: 40vh;
+    background: var(--bg);
+    color: var(--texto);
+    border: 1px solid var(--borde);
+    border-radius: 6px;
+    padding: 8px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+  }
+  .acciones {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+  }
+  .estado {
+    font-size: 0.85rem;
+    margin-top: 8px;
+    min-height: 1.2em;
+  }
+  .estado.ok { color: var(--ok); }
+  .estado.error { color: var(--error); }
+</style>
+</head>
+<body>
+
+<h1>Cueva1 — Panel</h1>
+<div class="subtitulo">Portal activo por 5 minutos desde el arranque del ESP.</div>
+
+<div class="barra">
+  <button class="primario" onclick="abrirPersonajes()">Personajes / Historias</button>
+  <button onclick="abrirAjustes()">Ajustes</button>
+</div>
+
+<div class="panel">
+  <div id="log">(cargando actividad...)</div>
+</div>
+
+<!-- Modal: personajes/historias (config.json crudo) -->
+<dialog id="dlgPersonajes">
+  <h2>Personajes / Historias</h2>
+  <label for="configJson">config.json</label>
+  <textarea id="configJson" spellcheck="false"></textarea>
+  <div id="estadoPersonajes" class="estado"></div>
+  <div class="acciones">
+    <button onclick="cerrarDialogo('dlgPersonajes')">Cancelar</button>
+    <button class="primario" onclick="guardarPersonajes()">Guardar</button>
+  </div>
+</dialog>
+
+<!-- Modal: ajustes (hostname + volumen) -->
+<dialog id="dlgAjustes">
+  <h2>Ajustes</h2>
+  <label for="hostname">Hostname (mDNS, sin ".local")</label>
+  <input type="text" id="hostname">
+  <label for="volumen">Volumen (0-30)</label>
+  <input type="number" id="volumen" min="0" max="30">
+  <div id="estadoAjustes" class="estado"></div>
+  <div class="acciones">
+    <button onclick="cerrarDialogo('dlgAjustes')">Cancelar</button>
+    <button class="primario" onclick="guardarAjustes()">Guardar</button>
+  </div>
+</dialog>
+
+<script>
+function cerrarDialogo(id) {
+  document.getElementById(id).close();
+}
+
+// --- Actividad (polling /api/log) ------------------------------------------
+async function actualizarLog() {
+  try {
+    const r = await fetch('/api/log');
+    const lineas = await r.json();
+    const el = document.getElementById('log');
+    const alFondo = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = lineas.join('\n');
+    if (alFondo) el.scrollTop = el.scrollHeight;
+  } catch (e) {
+    // portal probablemente apagado (paso el timeout de 5 min) -- no insistir en bucle rapido
+  }
+}
+setInterval(actualizarLog, 1500);
+actualizarLog();
+
+// --- Modal personajes/historias ---------------------------------------------
+async function abrirPersonajes() {
+  const estado = document.getElementById('estadoPersonajes');
+  estado.textContent = '';
+  estado.className = 'estado';
+  try {
+    const r = await fetch('/api/config');
+    const texto = await r.text();
+    document.getElementById('configJson').value = JSON.stringify(JSON.parse(texto), null, 2);
+  } catch (e) {
+    document.getElementById('configJson').value = '';
+  }
+  document.getElementById('dlgPersonajes').showModal();
+}
+
+async function guardarPersonajes() {
+  const estado = document.getElementById('estadoPersonajes');
+  const texto = document.getElementById('configJson').value;
+  try {
+    JSON.parse(texto); // valida en el navegador antes de mandarlo
+  } catch (e) {
+    estado.textContent = 'JSON invalido: ' + e.message;
+    estado.className = 'estado error';
+    return;
+  }
+  try {
+    const r = await fetch('/api/config', { method: 'POST', body: texto });
+    const j = await r.json();
+    if (j.ok) {
+      estado.textContent = 'Guardado y aplicado.';
+      estado.className = 'estado ok';
+    } else {
+      estado.textContent = 'Error: ' + (j.error || 'desconocido');
+      estado.className = 'estado error';
+    }
+  } catch (e) {
+    estado.textContent = 'No se pudo conectar con el ESP.';
+    estado.className = 'estado error';
+  }
+}
+
+// --- Modal ajustes -----------------------------------------------------------
+async function abrirAjustes() {
+  const estado = document.getElementById('estadoAjustes');
+  estado.textContent = '';
+  estado.className = 'estado';
+  try {
+    const r = await fetch('/api/settings');
+    const j = await r.json();
+    document.getElementById('hostname').value = j.hostname;
+    document.getElementById('volumen').value = j.volumen;
+  } catch (e) {
+    // deja los campos como esten
+  }
+  document.getElementById('dlgAjustes').showModal();
+}
+
+async function guardarAjustes() {
+  const estado = document.getElementById('estadoAjustes');
+  const body = JSON.stringify({
+    hostname: document.getElementById('hostname').value.trim(),
+    volumen: parseInt(document.getElementById('volumen').value, 10)
+  });
+  try {
+    const r = await fetch('/api/settings', { method: 'POST', body });
+    const j = await r.json();
+    if (j.ok) {
+      estado.textContent = 'Guardado. El volumen ya se aplico; el hostname nuevo puede tardar unos segundos en propagarse.';
+      estado.className = 'estado ok';
+    } else {
+      estado.textContent = 'Error: ' + (j.error || 'desconocido');
+      estado.className = 'estado error';
+    }
+  } catch (e) {
+    estado.textContent = 'No se pudo conectar con el ESP.';
+    estado.className = 'estado error';
+  }
+}
+</script>
+</body>
+</html>

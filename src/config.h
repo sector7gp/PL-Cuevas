@@ -16,6 +16,14 @@
 // las tablas vacias -- no cuelga el arranque.
 bool cargarConfiguracion();
 
+// Valida que `json` sea JSON parseable con el formato esperado, y si es asi
+// lo escribe en /config.json y recarga las tablas en memoria (equivalente a
+// cargarConfiguracion(), pero solo si la validacion paso). Usado por el
+// portal web al guardar el modal de personajes/historias -- asi un JSON mal
+// formado no deja al sistema sin configuracion. Devuelve false sin tocar el
+// archivo si `json` no es valido.
+bool guardarConfiguracionJSON(const String &json);
+
 // Busca un UID en la tabla de personajes. Devuelve el id (>0) o 0 si no
 // coincide con ningun personaje conocido.
 int personajeDeUID(const uint8_t *uid, uint8_t len);

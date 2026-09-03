@@ -10,7 +10,9 @@ implementa un sistema de historias por combinación de personajes: dos módulos
 representan personajes, y cuando dos personajes válidos quedan presentes a la
 vez (uno por lector, en cualquier orden), dispara la pista de audio asociada a
 esa combinación en un **DFPlayer Mini** por un tercer bus (UART), aparte del
-que usa el monitor de la PC.
+que usa el monitor de la PC. Incluye además un portal web de monitoreo y
+configuración, servido desde un Access Point propio del ESP32 (ver
+[Portal web](#portal-web-de-monitoreoconfiguración) más abajo).
 
 ## Comandos
 
@@ -38,14 +40,17 @@ porque expone GPIOs con funciones fijas que no son de propósito general:
 - La placa designa **GPIO 47/48** como su propio SDA/SCL "oficial", y
   **GPIO 17/18** como su propio TX1/RX1 "oficial" (disponibles en el conector
   `pUEXT`) — este proyecto usa 17/18 para el DFPlayer justamente porque son
-  los que la placa ya reserva para un segundo UART, libres de otro uso.
+  los que la placa ya reserva para un segundo UART, libres de otro uso. Los
+  roles quedan invertidos respecto a esa designación (17 es RX del ESP, 18 es
+  TX) porque conviene así en el PCB — sigue siendo válido porque el ESP32
+  mapea los pines de UART por matriz de software, no por asignación fija.
 
 ### Cableado
 
 ```
 Lector 1   VCC->3V3  GND->GND  SDA->GPIO 8   SCL->GPIO 9    (bus Wire,   I2C0)
-Lector 2   VCC->3V3  GND->GND  SDA->GPIO 11  SCL->GPIO 12   (bus Wire1,  I2C1)
-DFPlayer   VCC->5V   GND->GND  TX->GPIO 18   RX->GPIO 17    (bus Serial1, UART1)
+Lector 2   VCC->3V3  GND->GND  SDA->GPIO 12  SCL->GPIO 11   (bus Wire1,  I2C1)
+DFPlayer   VCC->5V   GND->GND  TX->GPIO 17   RX->GPIO 18    (bus Serial1, UART1)
 ```
 
 Los dos lectores están en **buses I2C de hardware completamente independientes**
@@ -91,11 +96,31 @@ I2C standalone (sin librería de lector, solo `Wire`), en su propio entorno de
 PlatformIO. Sirve para inspeccionar el bus —barrido de direcciones, niveles
 eléctricos con/sin pull-up— de forma independiente de qué chip esté conectado.
 
+[src/log.h](src/log.h) / [src/log.cpp](src/log.cpp) — logger compartido:
+`logf()`/`logln()` reemplazan a `Serial.printf()`/`Serial.println()` en todo
+el firmware, escribiendo cada línea tanto al monitor serie como a un buffer
+circular en RAM (`LOG_MAX_LINEAS` = 40 líneas de `LOG_MAX_LARGO` = 100
+caracteres) que `logComoJSON()` expone como array JSON — así el portal web
+puede mostrar el mismo log sin duplicar cada punto de logueo.
+
+[src/settings.h](src/settings.h) / [src/settings.cpp](src/settings.cpp) —
+`hostname` y `volumen` del DFPlayer, en `/settings.json` sobre LittleFS
+(separado de `config.json`, que es solo la tabla de personajes/historias:
+son dos cosas distintas que edita cada una su propio modal en el portal). Si
+falta o está corrupto, usa los valores por defecto del struct — mismo patrón
+de degradación que el resto del firmware.
+
+[src/portal.h](src/portal.h) / [src/portal.cpp](src/portal.cpp) — portal web,
+ver sección propia más abajo.
+
 ### Sistema de historias: personaje → combinación → pista
 
 [data/config.json](data/config.json) vive en **LittleFS**, no compilado en el
 firmware — se sube aparte con `pio run -t uploadfs` y se puede reemplazar sin
-reflashear (preparado para que a futuro un portal web lo edite). Formato:
+reflashear (por eso el portal web puede editarlo en caliente, ver más abajo,
+con `guardarConfiguracionJSON()` en [src/config.cpp](src/config.cpp): valida
+que el JSON parsee antes de escribirlo, así un JSON mal formado no deja al
+sistema sin configuración). Formato:
 
 ```json
 {
@@ -173,6 +198,52 @@ dígitos al principio — `0001xxx.mp3`, `0002xxx.mp3`, etc. (el resto del
 nombre después del número es libre). El número de cada archivo tiene que
 coincidir con la `pista` que le asignaste a esa historia/`pistaSolo` en
 `config.json`.
+
+## Portal web de monitoreo/configuración
+
+El ESP32 levanta un **Access Point propio** (no se une a ningún WiFi
+existente, no necesita credenciales de red) con la UI y la API del portal:
+
+- **SSID** `Cueva1`, **password** `cuevas123` (fijo en
+  [src/portal.cpp](src/portal.cpp), no editable desde el portal — cambiarlo
+  requiere tocar el código y reflashear).
+- **mDNS**: `http://<hostname>.local/`, `cueva1.local` por defecto
+  (`settings.json`, ver abajo). Si el dispositivo que se conecta no resuelve
+  mDNS, entra igual por la IP del AP (`192.168.4.1`).
+- Interfaz en [data/www/index.html](data/www/index.html) (subida a LittleFS
+  con `pio run -t uploadfs`, igual que `config.json`): un panel de actividad
+  en vivo (poll a `/api/log` cada 1.5 s) y dos modales —
+  **Personajes/Historias** (edita `config.json` crudo en un textarea, valida
+  el JSON en el navegador antes de mandarlo) y **Ajustes** (hostname y
+  volumen).
+- **API**: `GET/POST /api/config` (tabla de personajes/historias),
+  `GET/POST /api/settings` (hostname/volumen), `GET /api/log` (líneas
+  recientes del buffer de [src/log.h](src/log.h) como JSON). Guardar
+  ajustes aplica el volumen al DFPlayer al instante (vía un callback que
+  `main.cpp` pasa a `iniciarPortal()`, para que `portal.cpp` no dependa de
+  la librería del DFPlayer) y, si cambió el hostname, reinicia el mDNS
+  (`MDNS.end()` + `MDNS.begin()`) sin necesidad de reiniciar el ESP.
+- **Se apaga solo** a los `PORTAL_TIMEOUT_MS` (5 minutos) del boot —
+  `actualizarPortal()`, llamada sin condiciones en cada vuelta de `loop()`,
+  corta el servidor, el mDNS y el AP. Reduce la ventana de exposición del AP
+  y libera RAM/CPU; el resto del firmware (lectores, combinaciones, audio)
+  sigue funcionando igual sin el portal. Para reactivarlo hace falta
+  reiniciar el ESP.
+
+`data/settings.json` (también en LittleFS, mismo mecanismo que
+`config.json`):
+
+```json
+{
+  "hostname": "cueva1",
+  "volumen": 25
+}
+```
+
+`hostname` va sin `.local` (lo agrega mDNS) y `volumen` es 0-30 (rango del
+DFPlayer; el portal lo clampea si se manda un valor mayor). Si el archivo
+falta o está corrupto, `cargarSettings()` usa estos mismos valores por
+defecto — no bloquea el arranque.
 
 ## Detalle importante: reset del PN532 tras flashear
 
