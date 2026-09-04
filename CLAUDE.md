@@ -45,6 +45,10 @@ porque expone GPIOs con funciones fijas que no son de propósito general:
   TX) porque conviene así en el PCB — sigue siendo válido porque el ESP32
   mapea los pines de UART por matriz de software, no por asignación fija.
 
+Referencia para el diseño del PCB propio (símbolos, huellas y modelos 3D de
+KiCad del módulo **YD-ESP32-S3**, un clon económico del ESP32-S3):
+[sector7gp/YD-ESP32-S3](https://github.com/sector7gp/YD-ESP32-S3).
+
 ### Cableado
 
 ```
