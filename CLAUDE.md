@@ -20,6 +20,9 @@ configuración, servido desde un Access Point propio del ESP32 (ver
 pio run -t uploadfs                # sube data/config.json a LittleFS (solo cuando cambia)
 pio run -t upload -t monitor       # compilar, flashear y monitorear (entorno por defecto)
 pio run -e scanner -t upload -t monitor   # scanner I2C de diagnostico general
+
+pio run -e ota -t upload           # carga el firmware por red (ver OTA, mas abajo)
+pio run -e ota -t uploadfs         # idem para data/ (config.json, settings.json, www/)
 ```
 
 `uploadfs` y `upload` son independientes: cambiar el firmware no toca
@@ -232,7 +235,7 @@ existente, no necesita credenciales de red) con la UI y la API del portal:
   `main.cpp` pasa a `iniciarPortal()`, para que `portal.cpp` no dependa de
   la librería del DFPlayer) y, si cambió el hostname, reinicia el mDNS
   (`MDNS.end()` + `MDNS.begin()`) sin necesidad de reiniciar el ESP.
-- **Se apaga solo** a los `PORTAL_TIMEOUT_MS` (5 minutos) del boot —
+- **Se apaga solo** a los `PORTAL_TIMEOUT_MS` (60 minutos) del boot —
   `actualizarPortal()`, llamada sin condiciones en cada vuelta de `loop()`,
   corta el servidor, el mDNS y el AP. Reduce la ventana de exposición del AP
   y libera RAM/CPU; el resto del firmware (lectores, combinaciones, audio)
@@ -253,6 +256,52 @@ existente, no necesita credenciales de red) con la UI y la API del portal:
 DFPlayer; el portal lo clampea si se manda un valor mayor). Si el archivo
 falta o está corrupto, `cargarSettings()` usa estos mismos valores por
 defecto — no bloquea el arranque.
+
+## OTA: cargar firmware por red
+
+[src/ota.h](src/ota.h) / [src/ota.cpp](src/ota.cpp) — ArduinoOTA sobre el
+**mismo AP que levanta el portal**, así que no hace falta router ni internet:
+alcanza con estar conectado a `Cueva1`. Usa el mismo `hostname` de
+`settings.json`, o sea que el equipo se actualiza por la misma dirección por
+la que se lo monitorea.
+
+```bash
+pio run -e ota -t upload      # firmware
+pio run -e ota -t uploadfs    # data/ (config.json, settings.json, www/)
+```
+
+El entorno `[env:ota]` de `platformio.ini` es la misma build que la del
+entorno por defecto (`extends`), cambiando solo `upload_protocol = espota` y
+`upload_port`. El entorno por defecto **sigue siendo por cable**:
+`pio run -t upload` no cambió de significado.
+
+**`upload_port` va por IP (`192.168.4.1`), no por `cueva1.local`** — y esto
+no es una preferencia, es obligatorio en macOS: `espota.py` resuelve con
+`socket.gethostbyname()` de Python, que no consulta mDNSResponder. El
+resultado es desconcertante: `ping cueva1.local` y el navegador andan
+perfecto, pero el uploader corta con `Host cueva1.local Not Found`. La IP no
+es frágil: `192.168.4.1` es la que toma siempre el softAP del ESP32, y a
+diferencia del hostname no cambia si lo editás desde el portal.
+
+Tres cosas que importan:
+
+- **Huevo y gallina**: un ESP solo acepta OTA si ya tiene flasheada *por
+  cable* una versión que incluya este módulo. La primera carga de cada placa
+  nueva es sí o sí con cable; de ahí en más se actualiza por red.
+- **La ventana es la del portal.** `apagarPortal()` hace `WiFi.mode(WIFI_OFF)`
+  a los `PORTAL_TIMEOUT_MS` (60 min del boot), y sin WiFi no hay OTA. En la
+  práctica: reiniciás el ESP y tenés una hora para subir — el timeout se
+  subió de 5 a 60 min justamente porque con OTA 5 minutos era impracticable.
+  Por eso `loop()`
+  corta todo lo demás mientras `otaEnProgreso()` es `true` — si el portal se
+  apagara en medio de una transferencia se la llevaría puesta, y el sondeo de
+  los lectores (hasta 100 ms por vuelta) le robaría ancho de banda hasta
+  hacerla expirar.
+- **Una carga cortada no rompe nada.** `default_8MB.csv` ya trae `otadata` +
+  `app0`/`app1` de 3,34 MB cada una (el firmware ocupa ~32% de una), así que
+  no hubo que reparticionar: lo nuevo se escribe en la partición inactiva y
+  el arranque se conmuta recién al terminar bien. Si falla, sigue corriendo
+  el firmware viejo y se puede reintentar sin cable.
 
 ## Detalle importante: reset del PN532 tras flashear
 

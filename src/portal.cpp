@@ -135,7 +135,8 @@ static void apagarPortal() {
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
   portalActivo = false;
-  logln("Portal: apagado automatico (timeout de 5 min). Reiniciar el ESP para reactivarlo.");
+  logf("Portal: apagado automatico (timeout de %lu min). Reiniciar el ESP para reactivarlo.",
+       PORTAL_TIMEOUT_MS / 60000UL);
 }
 
 void actualizarPortal() {

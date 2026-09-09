@@ -36,7 +36,7 @@
  * settings.json via src/settings.h) y un monitor de actividad en vivo que
  * lee del mismo buffer que usa el logger (src/log.h) para el monitor serie.
  * El portal corre en un Access Point propio (ver src/portal.cpp) y se apaga
- * solo a los 5 minutos del boot.
+ * solo a los 60 minutos del boot.
  *
  * Cada lector va en su propio periferico I2C de hardware (Wire y Wire1): son
  * dos buses fisicamente independientes, no un bus compartido con dos
@@ -67,7 +67,7 @@
  * mecanismo que use tu placa concreta -- no todas usan el mismo esquema).
  *
  * Tira WS2812 (indicacion visual) en GPIO47 -- ver src/leds.h. Efecto IDLE
- * por ahora (glow azul continuo); pensado para sumar mas efectos despues sin
+ * por ahora (glow verde continuo); pensado para sumar mas efectos despues sin
  * tocar main.cpp.
  */
 
@@ -79,6 +79,7 @@
 #include "config.h"
 #include "leds.h"
 #include "log.h"
+#include "ota.h"
 #include "portal.h"
 #include "settings.h"
 
@@ -272,9 +273,21 @@ void setup() {
 
   iniciarLeds();
   iniciarPortal(aplicarVolumen);
+  iniciarOTA(settings.hostname.c_str()); // despues del portal: necesita el WiFi arriba
 }
 
 void loop() {
+  actualizarOTA();
+
+  // Mientras entra una carga OTA no se hace nada mas. Los dos motivos son
+  // concretos: actualizarPortal() podria apagar el AP por timeout justo en
+  // medio de la transferencia y llevarsela puesta, y el sondeo de los
+  // lectores cuesta hasta 100 ms por vuelta (dos timeouts de 50 ms) que le
+  // robarian ancho de banda a la carga hasta hacerla expirar.
+  if (otaEnProgreso()) {
+    return;
+  }
+
   actualizarPortal();
   actualizarLeds();
 

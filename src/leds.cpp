@@ -20,25 +20,28 @@ static unsigned long efectoDesde = 0;
 static unsigned long ultimoFrame = 0;
 
 // --- Efecto: EFECTO_IDLE -----------------------------------------------------
-// Glow azul: respiracion continua entre IDLE_BRILLO_MIN y IDLE_BRILLO_MAX del
+// Glow verde: respiracion continua entre IDLE_BRILLO_MIN y IDLE_BRILLO_MAX del
 // brillo maximo, un ciclo completo (subida + bajada) cada IDLE_PERIODO_MS.
 //
-// El brillo se hornea directo en el valor del canal azul (en vez de usar
+// El brillo se hornea directo en el valor del canal de color (en vez de usar
 // pixels.setBrightness()) a proposito: setBrightness() reescala el buffer de
 // color ya guardado en la tira segun la relacion con el brillo anterior, y
 // llamarlo en cada frame acumula error de redondeo con el tiempo. Escribir
 // el color final completo en cada frame evita ese problema de raiz.
-#define IDLE_BRILLO_MIN 0.40f
+// El minimo arranco en 0.40 y se bajo a 0.10: entre 40% y 70% la respiracion
+// existia pero no se percibia -- el brillo aparente va con la raiz, asi que
+// ese rango se leia como un color quieto. Desde 10% el ciclo si se nota.
+#define IDLE_BRILLO_MIN 0.10f
 #define IDLE_BRILLO_MAX 0.70f
 #define IDLE_PERIODO_MS 3000UL
 
 static void efectoIdle(unsigned long transcurrido) {
   float fase = (transcurrido % IDLE_PERIODO_MS) / (float)IDLE_PERIODO_MS; // 0..1
   float onda = (sinf(2.0f * PI * fase) + 1.0f) / 2.0f;                    // 0..1, suave
-  uint8_t azul = (uint8_t)((IDLE_BRILLO_MIN + onda * (IDLE_BRILLO_MAX - IDLE_BRILLO_MIN)) *
+  uint8_t verde = (uint8_t)((IDLE_BRILLO_MIN + onda * (IDLE_BRILLO_MAX - IDLE_BRILLO_MIN)) *
                                 255.0f +
                             0.5f);
-  pixels.fill(pixels.Color(0, 0, azul));
+  pixels.fill(pixels.Color(0, verde, 0));
 }
 
 // Despacho del efecto activo. Para sumar un efecto nuevo: agregar su valor a

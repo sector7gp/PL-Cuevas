@@ -11,7 +11,7 @@
 
 #include <Arduino.h>
 
-// Efectos disponibles. EFECTO_IDLE es el unico por ahora (glow azul en
+// Efectos disponibles. EFECTO_IDLE es el unico por ahora (glow verde en
 // respiracion continua); los que se sumen despues van aca.
 enum EfectoLed {
   EFECTO_IDLE,
