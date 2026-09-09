@@ -81,7 +81,12 @@ timeout explícito la librería usa `timeout=0`, que significa *bloquear para
 siempre* (`Adafruit_PN532.h`) — con dos lectores independientes, si el Lector 1
 no tiene tag puesto y bloqueara para siempre, el Lector 2 nunca se llegaría a
 consultar. Si un lector no aparece al arrancar, el otro sigue funcionando sin
-bloquearse — nunca hay un `while(1)` que dependa de que los dos estén presentes.
+bloquearse — no hay ningún `while(1)` en `setup()`. Ni siquiera cuando **no
+aparece ninguno de los dos**: en ese caso se loguea el diagnóstico y se sigue
+de largo igual, para que el DFPlayer, los LEDs y sobre todo el **portal**
+lleguen a arrancar. El portal es la única forma de leer el log sin un monitor
+serie enchufado, así que colgarse antes de levantarlo dejaba al equipo mudo
+justo en el caso en que más falta hace.
 
 Está basado directamente en [ejemplo_ok.ino](ejemplo_ok/ejemplo_ok.ino): un
 sketch mínimo de un solo lector que sirve como referencia de la secuencia de

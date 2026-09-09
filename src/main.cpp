@@ -65,6 +65,10 @@
  *
  * Cada PN532 debe estar en modo I2C por hardware (DIP switches, jumper, o el
  * mecanismo que use tu placa concreta -- no todas usan el mismo esquema).
+ *
+ * Tira WS2812 (indicacion visual) en GPIO47 -- ver src/leds.h. Efecto IDLE
+ * por ahora (glow azul continuo); pensado para sumar mas efectos despues sin
+ * tocar main.cpp.
  */
 
 #include <Adafruit_PN532.h>
@@ -73,6 +77,7 @@
 #include <Wire.h>
 
 #include "config.h"
+#include "leds.h"
 #include "log.h"
 #include "portal.h"
 #include "settings.h"
@@ -239,13 +244,20 @@ void setup() {
   Wire1.setTimeOut(100);
   lector2_ok = initLector(pn532_2, "Lector 2");
 
+  // Sin ningun lector no hay historias posibles, pero setup() NO se frena
+  // aca: antes habia un while(1) en este punto que dejaba al ESP colgado sin
+  // llegar nunca a iniciarPortal(), justo en el unico caso en que el portal
+  // es imprescindible -- es la unica forma de leer el log si no hay un
+  // monitor serie enchufado. Se sigue de largo: loop() no toca los lectores
+  // (actualizarLector() ya sale temprano si no estan activos) y el portal
+  // queda arriba para diagnosticar.
   if (!lector1_ok && !lector2_ok) {
     logln("Ningun lector encontrado. Revisa alimentacion, cableado SDA/SCL y");
-    logln("el modo I2C de cada modulo.");
-    while (1) {
-    }
+    logln("el modo I2C de cada modulo. Sin lectores no se disparan historias;");
+    logln("el portal queda arriba igual para poder leer este log.");
+  } else {
+    logln("Esperando personajes...");
   }
-  logln("Esperando personajes...");
 
   // Serial1 (UART1) para el DFPlayer, independiente de Serial (UART0, el
   // monitor). Igual que los lectores: si no responde, no se cuelga el resto.
@@ -258,11 +270,13 @@ void setup() {
     logln("DFPlayer Mini: no responde por Serial1 (GPIO17/18).");
   }
 
+  iniciarLeds();
   iniciarPortal(aplicarVolumen);
 }
 
 void loop() {
   actualizarPortal();
+  actualizarLeds();
 
   actualizarLector(pn532_1, lector1_ok, estado1, "Lector 1");
   actualizarLector(pn532_2, lector2_ok, estado2, "Lector 2");
