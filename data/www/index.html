@@ -149,13 +149,23 @@
   </div>
 </dialog>
 
-<!-- Modal: ajustes (hostname + volumen) -->
+<!-- Modal: ajustes (SSID + hostname + volumen) -->
 <dialog id="dlgAjustes">
   <h2>Ajustes</h2>
+  <label for="ssid">Nombre de la red WiFi / SSID (toma efecto al reiniciar)</label>
+  <input type="text" id="ssid" maxlength="32">
   <label for="hostname">Hostname (mDNS, sin ".local")</label>
   <input type="text" id="hostname">
   <label for="volumen">Volumen (0-30)</label>
   <input type="number" id="volumen" min="0" max="30">
+  <label for="largoTira">Cantidad de LEDs de la tira (1-300)</label>
+  <input type="number" id="largoTira" min="1" max="300">
+  <label for="colorIdle">Color en reposo (pico del glow)</label>
+  <input type="color" id="colorIdle">
+  <label for="colorDetectado">Color con personajes puestos</label>
+  <input type="color" id="colorDetectado">
+  <label for="colorReproduciendo">Color mientras suena el cuento</label>
+  <input type="color" id="colorReproduciendo">
   <div id="estadoAjustes" class="estado"></div>
   <div class="acciones">
     <button onclick="cerrarDialogo('dlgAjustes')">Cancelar</button>
@@ -233,8 +243,13 @@ async function abrirAjustes() {
   try {
     const r = await fetch('/api/settings');
     const j = await r.json();
+    document.getElementById('ssid').value = j.ssid;
     document.getElementById('hostname').value = j.hostname;
     document.getElementById('volumen').value = j.volumen;
+    document.getElementById('largoTira').value = j.largoTira;
+    document.getElementById('colorIdle').value = j.colorIdle;
+    document.getElementById('colorDetectado').value = j.colorDetectado;
+    document.getElementById('colorReproduciendo').value = j.colorReproduciendo;
   } catch (e) {
     // deja los campos como esten
   }
@@ -244,14 +259,21 @@ async function abrirAjustes() {
 async function guardarAjustes() {
   const estado = document.getElementById('estadoAjustes');
   const body = JSON.stringify({
+    ssid: document.getElementById('ssid').value.trim(),
     hostname: document.getElementById('hostname').value.trim(),
-    volumen: parseInt(document.getElementById('volumen').value, 10)
+    volumen: parseInt(document.getElementById('volumen').value, 10),
+    largoTira: parseInt(document.getElementById('largoTira').value, 10),
+    colorIdle: document.getElementById('colorIdle').value,
+    colorDetectado: document.getElementById('colorDetectado').value,
+    colorReproduciendo: document.getElementById('colorReproduciendo').value
   });
   try {
     const r = await fetch('/api/settings', { method: 'POST', body });
     const j = await r.json();
     if (j.ok) {
-      estado.textContent = 'Guardado. El volumen ya se aplico; el hostname nuevo puede tardar unos segundos en propagarse.';
+      estado.textContent = j.reiniciar
+        ? 'Guardado. El SSID nuevo recien se aplica al reiniciar el ESP: hasta entonces la red sigue llamandose como antes.'
+        : 'Guardado. El volumen y los colores ya se aplicaron; el hostname nuevo puede tardar unos segundos en propagarse.';
       estado.className = 'estado ok';
     } else {
       estado.textContent = 'Error: ' + (j.error || 'desconocido');

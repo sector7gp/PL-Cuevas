@@ -2,6 +2,105 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [v0.9] - 2026-09-09
+
+### Agregado
+- **Versión del firmware visible en el equipo.** `scripts/version.py` es un
+  `extra_scripts` de PlatformIO que define `FIRMWARE_VERSION` con la salida de
+  `git describe --tags --always --dirty` en cada compilación, y `main.cpp` la
+  imprime como primera línea del log (visible también desde el portal).
+  Produce `v0.9` sobre el tag, `v0.9-3-gabc1234` en `dev`, y el sufijo
+  `-dirty` si había cambios sin commitear — el dato que más importa en una
+  cueva desplegada, porque avisa que ese equipo tiene un binario que no se
+  puede reproducir desde el repo.
+- **Tercer estado de la tira.** Ahora son tres, elegidos por prioridad al
+  final de `loop()`: `EFECTO_IDLE` (glow de reposo), `EFECTO_DETECTADO`
+  (color fijo apenas hay un tag puesto, reconocido o no) y
+  `EFECTO_REPRODUCIENDO` (color fijo mientras se cuenta una historia). Todas
+  las transiciones entran con un fade de 800 ms.
+- **Configurables desde el modal de Ajustes**, todos aplicados en caliente sin
+  reflashear ni reiniciar:
+  - **SSID** del Access Point. Con varias cuevas desplegadas, si no todas
+    emitirían el mismo nombre de red. A diferencia del resto, este **no** se
+    aplica en caliente: rehacer el `softAP()` tiraría a todos los clientes,
+    empezando por el que mandó el POST.
+  - **Los tres colores** de la tira (`colorIdle`, `colorDetectado`,
+    `colorReproduciendo`), con `<input type="color">`.
+  - **Largo de la tira** (`largoTira`, 1–300), vía `updateLength()`.
+- Validación de formato **al guardar y al cargar** para cada campo nuevo. Un
+  SSID vacío o un color mal escrito dejaría el equipo sin AP o con la tira
+  apagada, y sin AP no hay portal ni OTA para deshacerlo: solo el cable.
+
+### Cambiado
+- El callback del portal pasa de `onVolumenCambiado(uint8_t)` a
+  `onAjustesCambiados(const Settings &)`. Con los colores hubieran hecho falta
+  dos callbacks, y el próximo ajuste, tres.
+- La tira **deja de refrescarse** cuando termina el fade de un estado de color
+  fijo. `pixels.show()` deshabilita interrupciones ~30 µs por LED (~1,8 ms con
+  60), y hacerlo 50 veces por segundo para siempre le competía al WiFi y sobre
+  todo a las cargas por OTA. Ese mismo costo es el que fija el tope de 300
+  LEDs.
+- El glow de reposo toma el color configurado como **pico** de la respiración
+  (rango 0.10–1.00), así lo que se elige en el color picker es exactamente lo
+  que se ve en el punto más brillante.
+
+### Corregido
+- **El color de "reproduciendo" no se veía nunca.** El flag que lo enciende se
+  apagaba también en la rama de "no hay pareja", que con un solo personaje
+  puesto corre en *cada* vuelta de `loop()` y está antes de los disparadores de
+  audio: se apagaba una iteración después de encenderse, así que el estado
+  duraba decenas de milisegundos contra un fade de 800 ms y era invisible.
+  Ahora hay un **único** lugar que lo apaga —el cambio de presencia de tags—
+  ubicado antes de todos los disparadores.
+- El aviso genérico de espera ("poné el otro personaje") ya no cuenta como
+  historia: es una instrucción, no una narración, así que la tira se queda en
+  el color de detectado mientras suena. Sí cuentan el cuento de la pareja y el
+  `pistaSolo` de un personaje.
+
+## [v0.8] - 2026-09-09
+
+### Agregado
+- **Carga de firmware por red (OTA)**, sobre el mismo Access Point que ya
+  levanta el portal — no hace falta router ni internet.
+  `src/ota.h`/`.cpp` (ArduinoOTA) más un entorno `[env:ota]` en
+  `platformio.ini` que es la misma build que la del entorno por defecto
+  (`extends`) cambiando solo el protocolo. `pio run -t upload` sigue siendo
+  por cable. No hizo falta reparticionar: `default_8MB.csv` ya traía `otadata`
+  y `app0`/`app1`. Cuesta +18 KB de flash.
+  - `upload_port` va por IP y **no** por `cueva1.local`: `espota.py` resuelve
+    con `socket.gethostbyname()` de Python, que en macOS no consulta
+    mDNSResponder, así que el ping y el navegador encuentran el host pero el
+    uploader corta con `Host Not Found`.
+  - `loop()` no hace nada más mientras hay una transferencia en curso: el
+    portal podría apagarse por timeout en medio y llevarse el WiFi, y el
+    sondeo de los lectores le robaría ancho de banda hasta hacerla expirar.
+
+### Cambiado
+- `PORTAL_TIMEOUT_MS` de 5 a **60 minutos**. Apagar el portal apaga el WiFi
+  entero, y con él el OTA: 5 minutos obligaba a resetear el ESP y apurarse en
+  cada carga por red.
+- El glow de reposo pasa de azul a verde.
+
+### Corregido
+- `apagarPortal()` tenía "5 min" escrito a mano en su mensaje de log, así que
+  con el cambio de timeout habría reportado un número falso. Ahora lo calcula
+  de `PORTAL_TIMEOUT_MS`, igual que el mensaje de arranque.
+
+## [v0.7] - 2026-09-09
+
+### Agregado
+- Tira **WS2812** de indicación visual en GPIO47 (`src/leds.h`/`.cpp`), con un
+  efecto de reposo y la estructura para sumar más sin cambiar la interfaz del
+  módulo. Dependencia `adafruit/Adafruit NeoPixel@^1.12.5`.
+
+### Corregido
+- **Si no aparecía ningún lector, el portal no llegaba a levantar.** `setup()`
+  se colgaba en un `while(1)` ubicado antes de `iniciarPortal()`, así que no
+  arrancaban ni el DFPlayer, ni los LEDs, ni el portal — justo en el único
+  caso en que el portal es imprescindible, porque sin monitor serie enchufado
+  es la única forma de leer el log y averiguar por qué no aparecen. Ahora
+  loguea el diagnóstico y sigue de largo.
+
 ## [v0.6] - 2026-09-03
 
 ### Agregado

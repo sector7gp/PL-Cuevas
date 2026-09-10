@@ -1,4 +1,9 @@
 {
+  "ssid": "Cueva1",
   "hostname": "cueva1",
-  "volumen": 25
+  "volumen": 25,
+  "colorIdle": "#00B200",
+  "colorDetectado": "#80FFFF",
+  "colorReproduciendo": "#FFA000",
+  "largoTira": 60
 }

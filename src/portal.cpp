@@ -10,16 +10,16 @@
 #include "log.h"
 #include "settings.h"
 
-// WPA2 exige minimo 8 caracteres. Password fijo: no forma parte del modal de
-// ajustes (ese solo expone hostname/volumen) -- cambiarlo requiere editar
-// este archivo y reflashear.
-#define AP_SSID "Cueva1"
+// WPA2 exige minimo 8 caracteres. El password sigue fijo aca: cambiarlo
+// requiere editar este archivo y reflashear. El SSID en cambio si es
+// configurable desde el modal de ajustes (settings.json), porque con varias
+// cuevas desplegadas todas emitirian el mismo nombre de red.
 #define AP_PASSWORD "cuevas123"
 
 static WebServer server(80);
 static bool portalActivo = false;
 static unsigned long portalInicio = 0;
-static void (*volumenCallback)(uint8_t) = nullptr;
+static void (*ajustesCallback)(const Settings &) = nullptr;
 static Settings settingsActuales;
 
 static void manejarRaiz() {
@@ -56,8 +56,12 @@ static void manejarPostConfig() {
 }
 
 static void manejarGetSettings() {
-  String json = "{\"hostname\":\"" + settingsActuales.hostname +
-                "\",\"volumen\":" + String(settingsActuales.volumen) + "}";
+  String json = "{\"ssid\":\"" + settingsActuales.ssid + "\",\"hostname\":\"" +
+                settingsActuales.hostname + "\",\"volumen\":" + String(settingsActuales.volumen) +
+                ",\"colorIdle\":\"" + settingsActuales.colorIdle + "\",\"colorDetectado\":\"" +
+                settingsActuales.colorDetectado + "\",\"colorReproduciendo\":\"" +
+                settingsActuales.colorReproduciendo +
+                "\",\"largoTira\":" + String(settingsActuales.largoTira) + "}";
   server.send(200, "application/json", json);
 }
 
@@ -74,10 +78,38 @@ static void manejarPostSettings() {
   }
 
   Settings nuevo;
+  nuevo.ssid = doc["ssid"] | settingsActuales.ssid;
   nuevo.hostname = doc["hostname"] | settingsActuales.hostname;
   nuevo.volumen = doc["volumen"] | settingsActuales.volumen;
+  nuevo.colorIdle = doc["colorIdle"] | settingsActuales.colorIdle;
+  nuevo.colorDetectado = doc["colorDetectado"] | settingsActuales.colorDetectado;
+  nuevo.colorReproduciendo = doc["colorReproduciendo"] | settingsActuales.colorReproduciendo;
+  nuevo.largoTira = doc["largoTira"] | settingsActuales.largoTira;
   if (nuevo.volumen > 30) {
     nuevo.volumen = 30; // rango valido del DFPlayer
+  }
+
+  if (!colorValido(nuevo.colorIdle) || !colorValido(nuevo.colorDetectado) ||
+      !colorValido(nuevo.colorReproduciendo)) {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"error\":\"color mal formado, se espera #RRGGBB\"}");
+    return;
+  }
+
+  if (nuevo.largoTira == 0 || nuevo.largoTira > LED_MAX_LARGO) {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"error\":\"largo de tira fuera de rango (1-" +
+                    String(LED_MAX_LARGO) + ")\"}");
+    return;
+  }
+
+  // Se rechaza en vez de corregir en silencio: guardar un SSID imposible
+  // dejaria el AP sin levantar en el proximo arranque, y sin AP no hay portal
+  // ni OTA para deshacerlo -- solo el cable.
+  if (!ssidValido(nuevo.ssid)) {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"error\":\"SSID vacio o de mas de 32 caracteres\"}");
+    return;
   }
 
   if (!guardarSettings(nuevo)) {
@@ -86,13 +118,17 @@ static void manejarPostSettings() {
   }
 
   bool hostnameCambio = (nuevo.hostname != settingsActuales.hostname);
+  bool ssidCambio = (nuevo.ssid != settingsActuales.ssid);
   settingsActuales = nuevo;
 
-  if (volumenCallback) {
-    volumenCallback(settingsActuales.volumen);
+  if (ajustesCallback) {
+    ajustesCallback(settingsActuales);
   }
-  logf("Portal: ajustes actualizados (hostname=%s, volumen=%u).", settingsActuales.hostname.c_str(),
-       settingsActuales.volumen);
+  logf("Portal: ajustes actualizados (hostname=%s, volumen=%u, tira=%u LEDs, idle=%s,"
+       " detectado=%s, reproduciendo=%s).",
+       settingsActuales.hostname.c_str(), settingsActuales.volumen, settingsActuales.largoTira,
+       settingsActuales.colorIdle.c_str(), settingsActuales.colorDetectado.c_str(),
+       settingsActuales.colorReproduciendo.c_str());
 
   if (hostnameCambio) {
     MDNS.end();
@@ -100,15 +136,27 @@ static void manejarPostSettings() {
     logf("Portal: mDNS ahora responde en %s.local", settingsActuales.hostname.c_str());
   }
 
-  server.send(200, "application/json", "{\"ok\":true}");
+  // El SSID, a diferencia del hostname, NO se aplica en caliente: rehacer el
+  // softAP tira a todos los clientes conectados, empezando por el que acaba
+  // de mandar este POST -- que se quedaria sin saber si su cambio se guardo.
+  // Queda escrito y toma efecto en el proximo arranque.
+  if (ssidCambio) {
+    logf("Portal: SSID nuevo '%s'. Toma efecto al reiniciar el ESP; hasta"
+         " entonces el AP sigue siendo el anterior.",
+         settingsActuales.ssid.c_str());
+  }
+
+  server.send(200, "application/json",
+              ssidCambio ? "{\"ok\":true,\"reiniciar\":true}" : "{\"ok\":true}");
 }
 
-void iniciarPortal(void (*onVolumenCambiado)(uint8_t)) {
-  volumenCallback = onVolumenCambiado;
+void iniciarPortal(void (*onAjustesCambiados)(const Settings &)) {
+  ajustesCallback = onAjustesCambiados;
   settingsActuales = cargarSettings();
 
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  logf("Portal: AP '%s' arriba, IP %s", AP_SSID, WiFi.softAPIP().toString().c_str());
+  WiFi.softAP(settingsActuales.ssid.c_str(), AP_PASSWORD);
+  logf("Portal: AP '%s' arriba, IP %s", settingsActuales.ssid.c_str(),
+       WiFi.softAPIP().toString().c_str());
 
   if (MDNS.begin(settingsActuales.hostname.c_str())) {
     logf("Portal: mDNS activo -> http://%s.local/", settingsActuales.hostname.c_str());
