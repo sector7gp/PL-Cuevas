@@ -17,15 +17,19 @@
 
 #include <Arduino.h>
 
+#include "settings.h"
+
 // 60 minutos. Arranco en 5, pero con OTA en el equipo esa ventana quedaba muy
 // corta para trabajar: cada carga por red exigia resetear el ESP y apurarse.
 #define PORTAL_TIMEOUT_MS (60UL * 60UL * 1000UL) // 60 minutos desde el boot
 
 // Arranca el AP WiFi, mDNS y el servidor web. Llamar una vez en setup(),
-// despues de cargarConfiguracion(). `onVolumenCambiado` se invoca cuando el
-// modal de ajustes guarda un volumen nuevo, para que main.cpp lo aplique al
-// DFPlayer sin que este modulo dependa de esa libreria.
-void iniciarPortal(void (*onVolumenCambiado)(uint8_t));
+// despues de cargarConfiguracion(). `onAjustesCambiados` se invoca cada vez
+// que el modal de ajustes guarda, con los valores ya validados, para que
+// main.cpp los aplique al hardware (volumen al DFPlayer, colores a la tira)
+// sin que este modulo dependa de esas librerias. Es un unico callback con
+// todo el struct a proposito: agregar un ajuste no obliga a sumar otro.
+void iniciarPortal(void (*onAjustesCambiados)(const Settings &));
 
 // Atiende clientes HTTP pendientes y chequea el timeout de apagado. Llamar
 // en cada vuelta de loop() sin condiciones -- no hace nada si el portal ya

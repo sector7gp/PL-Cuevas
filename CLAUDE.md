@@ -10,9 +10,13 @@ implementa un sistema de historias por combinación de personajes: dos módulos
 representan personajes, y cuando dos personajes válidos quedan presentes a la
 vez (uno por lector, en cualquier orden), dispara la pista de audio asociada a
 esa combinación en un **DFPlayer Mini** por un tercer bus (UART), aparte del
-que usa el monitor de la PC. Incluye además un portal web de monitoreo y
-configuración, servido desde un Access Point propio del ESP32 (ver
-[Portal web](#portal-web-de-monitoreoconfiguración) más abajo).
+que usa el monitor de la PC. Una **tira WS2812** acompaña con tres estados
+(reposo, hay personajes puestos, se está contando una historia).
+
+Incluye además un portal web de monitoreo y configuración, servido desde un
+Access Point propio del ESP32, y **carga de firmware por red (OTA)** sobre ese
+mismo AP — ver [Portal web](#portal-web-de-monitoreoconfiguración) y
+[OTA](#ota-cargar-firmware-por-red) más abajo.
 
 ## Comandos
 
@@ -116,14 +120,73 @@ caracteres) que `logComoJSON()` expone como array JSON — así el portal web
 puede mostrar el mismo log sin duplicar cada punto de logueo.
 
 [src/settings.h](src/settings.h) / [src/settings.cpp](src/settings.cpp) —
-`hostname` y `volumen` del DFPlayer, en `/settings.json` sobre LittleFS
-(separado de `config.json`, que es solo la tabla de personajes/historias:
-son dos cosas distintas que edita cada una su propio modal en el portal). Si
-falta o está corrupto, usa los valores por defecto del struct — mismo patrón
-de degradación que el resto del firmware.
+`ssid`, `hostname`, `volumen` del DFPlayer, y el largo y los tres colores de
+la tira, en
+`/settings.json` sobre LittleFS (separado de `config.json`, que es solo la
+tabla de personajes/historias: son dos cosas distintas que edita cada una su
+propio modal en el portal). Si falta o está corrupto, usa los valores por
+defecto del struct — mismo patrón de degradación que el resto del firmware.
+Cada campo con formato propio (SSID, colores) se valida **al cargar y al
+guardar**: un valor imposible escrito a mano vuelve al default en vez de
+propagarse.
+
+[src/leds.h](src/leds.h) / [src/leds.cpp](src/leds.cpp) — tira WS2812 en
+**GPIO47**. Tres estados, que `loop()` elige **por prioridad** en cada vuelta:
+
+| Efecto | Cuándo | Color por defecto | Comportamiento |
+|---|---|---|---|
+| `EFECTO_REPRODUCIENDO` | Se está contando una historia | `#FFA000` ámbar | Fijo |
+| `EFECTO_DETECTADO` | Hay uno o más tags puestos | `#80FFFF` cian claro | Fijo |
+| `EFECTO_IDLE` | No hay nada puesto | `#00B200` verde | **Glow**: respiración continua |
+
+Detalles del mapeo que no son obvios:
+
+- **`EFECTO_DETECTADO` cuenta cualquier tag, reconocido o no.** Físicamente
+  hay algo puesto, y el visitante merece la devolución visual aunque el tag no
+  esté en `config.json`. Es el mismo criterio que ya usa la espera en dos
+  etapas.
+- **`historiaSonando` lo encienden las dos clases de historia** — el cuento de
+  la pareja y el `pistaSolo` de un personaje — pero **no el aviso genérico de
+  espera**: ese dice "poné el otro personaje", no narra nada, así que la tira
+  se queda en el color de detectado mientras suena.
+- **Se apaga sólo cuando cambia la presencia de tags**, en un único lugar
+  ubicado antes de los disparadores de audio. Antes se apagaba también en la
+  rama de "no hay pareja", que con un solo personaje corre en *cada* vuelta:
+  el flag se apagaba una iteración después de encenderse y el ámbar no se
+  llegaba a ver nunca.
+- **Vuelve de ámbar cuando se retira el personaje, no cuando termina el mp3.**
+  El firmware no consulta el estado *busy* del DFPlayer — decisión explícita,
+  no olvido. El evento real disponible es el cambio de tags.
+- El bloque de estado va **al final de `loop()`** a propósito: así ve los
+  audios disparados más arriba en esa misma vuelta, en vez de reaccionar recién
+  en la siguiente.
+
+Todos los cambios de estado entran con un fade de `FADE_MS` (800 ms) desde el
+color que hubiera puesto — nunca hay saltos. En el glow, el color configurado
+es el **pico** de la respiración (`IDLE_BRILLO_MAX` es 1.00), así lo que se
+elige en el color picker es exactamente lo que se ve en el punto más
+brillante; el mínimo baja a 0.10 porque el brillo aparente va con la raíz y un
+rango angosto se percibe como un color quieto.
+
+Ni los colores ni el largo están cableados: salen de `settings.json` y
+`setColoresLed()` / `setLargoTira()` los cambian **en caliente** desde el
+portal, sin reflashear ni reiniciar. `setLargoTira()` usa `updateLength()`,
+que reasigna el buffer dejándolo en cero — por eso redibuja después, o la tira
+quedaría apagada hasta el próximo cambio de estado, que en reposo podría no
+llegar nunca.
+
+Detalle que importa: en los dos efectos de color fijo, cuando el fade termina
+el módulo **deja de refrescar** (`estabilizado`). No es microoptimización —
+`pixels.show()` deshabilita interrupciones ~30 µs por LED (~1,8 ms con 60), y
+hacerlo 50 veces por segundo para siempre le compite al WiFi y sobre todo a
+las cargas por OTA. Ese mismo costo es el que fija `LED_MAX_LARGO` en 300:
+con esa cantidad son ~9 ms por refresco. `EFECTO_IDLE` sí anima siempre,
+porque la respiración es continua por definición.
 
 [src/portal.h](src/portal.h) / [src/portal.cpp](src/portal.cpp) — portal web,
-ver sección propia más abajo.
+ver sección propia más abajo. Su callback es **uno solo con todo el struct**
+(`onAjustesCambiados(const Settings &)`) y no uno por campo: agregar un ajuste
+que haya que aplicar al hardware no obliga a sumar otro callback.
 
 ### Sistema de historias: personaje → combinación → pista
 
@@ -216,9 +279,16 @@ coincidir con la `pista` que le asignaste a esa historia/`pistaSolo` en
 El ESP32 levanta un **Access Point propio** (no se une a ningún WiFi
 existente, no necesita credenciales de red) con la UI y la API del portal:
 
-- **SSID** `Cueva1`, **password** `cuevas123` (fijo en
-  [src/portal.cpp](src/portal.cpp), no editable desde el portal — cambiarlo
-  requiere tocar el código y reflashear).
+- **SSID** `Cueva1` por defecto, **editable desde el modal de Ajustes**
+  (`settings.json`) — con varias cuevas desplegadas, si no todas emitirían el
+  mismo nombre de red. A diferencia del hostname, **no se aplica en caliente**:
+  rehacer el `softAP()` tiraría a todos los clientes conectados, empezando por
+  el que acaba de mandar el POST, que se quedaría sin saber si su cambio se
+  guardó. Queda escrito y toma efecto al reiniciar. El SSID se valida (1-32
+  caracteres) al guardar **y** al cargar: un SSID imposible deja el AP sin
+  levantar, y sin AP no hay portal ni OTA para deshacerlo — solo el cable.
+- **Password** `cuevas123`, ese sí fijo en
+  [src/portal.cpp](src/portal.cpp) — cambiarlo requiere tocar el código.
 - **mDNS**: `http://<hostname>.local/`, `cueva1.local` por defecto
   (`settings.json`, ver abajo). Si el dispositivo que se conecta no resuelve
   mDNS, entra igual por la IP del AP (`192.168.4.1`).
@@ -226,15 +296,17 @@ existente, no necesita credenciales de red) con la UI y la API del portal:
   con `pio run -t uploadfs`, igual que `config.json`): un panel de actividad
   en vivo (poll a `/api/log` cada 1.5 s) y dos modales —
   **Personajes/Historias** (edita `config.json` crudo en un textarea, valida
-  el JSON en el navegador antes de mandarlo) y **Ajustes** (hostname y
-  volumen).
+  el JSON en el navegador antes de mandarlo) y **Ajustes** (SSID, hostname,
+  volumen, largo de la tira y sus tres colores).
 - **API**: `GET/POST /api/config` (tabla de personajes/historias),
-  `GET/POST /api/settings` (hostname/volumen), `GET /api/log` (líneas
+  `GET/POST /api/settings` (todos los ajustes), `GET /api/log` (líneas
   recientes del buffer de [src/log.h](src/log.h) como JSON). Guardar
-  ajustes aplica el volumen al DFPlayer al instante (vía un callback que
-  `main.cpp` pasa a `iniciarPortal()`, para que `portal.cpp` no dependa de
-  la librería del DFPlayer) y, si cambió el hostname, reinicia el mDNS
-  (`MDNS.end()` + `MDNS.begin()`) sin necesidad de reiniciar el ESP.
+  ajustes los aplica al hardware al instante —volumen al DFPlayer, largo y
+  colores a la tira— vía un callback que `main.cpp` pasa a `iniciarPortal()`,
+  para que `portal.cpp` no dependa ni de la librería del DFPlayer ni de la de
+  la tira; y si cambió el hostname reinicia el mDNS (`MDNS.end()` +
+  `MDNS.begin()`) sin necesidad de reiniciar el ESP. **El SSID es la
+  excepción**: se guarda pero recién toma efecto al reiniciar.
 - **Se apaga solo** a los `PORTAL_TIMEOUT_MS` (60 minutos) del boot —
   `actualizarPortal()`, llamada sin condiciones en cada vuelta de `loop()`,
   corta el servidor, el mDNS y el AP. Reduce la ventana de exposición del AP
@@ -247,15 +319,44 @@ existente, no necesita credenciales de red) con la UI y la API del portal:
 
 ```json
 {
+  "ssid": "Cueva1",
   "hostname": "cueva1",
-  "volumen": 25
+  "volumen": 25,
+  "colorIdle": "#00B200",
+  "colorDetectado": "#80FFFF",
+  "colorReproduciendo": "#FFA000",
+  "largoTira": 60
 }
 ```
 
 `hostname` va sin `.local` (lo agrega mDNS) y `volumen` es 0-30 (rango del
-DFPlayer; el portal lo clampea si se manda un valor mayor). Si el archivo
-falta o está corrupto, `cargarSettings()` usa estos mismos valores por
-defecto — no bloquea el arranque.
+DFPlayer; el portal lo clampea si se manda un valor mayor). `ssid` acepta 1-32
+caracteres, los colores son `#RRGGBB` y `largoTira` va de 1 a `LED_MAX_LARGO`
+(300). Si el archivo falta o está corrupto, `cargarSettings()` usa estos
+mismos valores por defecto — no bloquea el arranque; y cada campo con formato
+propio se valida por separado, así un valor imposible vuelve a su default en
+vez de propagarse.
+
+## Versión del firmware
+
+[scripts/version.py](scripts/version.py) es un `extra_scripts` de PlatformIO
+que corre antes de cada compilación y define la macro `FIRMWARE_VERSION` con
+la salida de `git describe --tags --always --dirty`. `main.cpp` la imprime
+como **primera línea del log**, así que queda arriba de todo cuando se lee el
+arranque desde el portal (el buffer son 40 líneas circulares).
+
+| Lo que loguea | Qué significa |
+|---|---|
+| `v0.8` | Build parada justo sobre el tag |
+| `v0.8-3-gabc1234` | 3 commits después del tag — lo típico en `dev` |
+| `v0.8-3-gabc1234-dirty` | Además hay cambios sin commitear |
+
+El `-dirty` es el dato que más importa en una cueva ya desplegada: avisa que
+ese equipo tiene un binario que **no se puede reproducir desde el repo**. Sin
+esto, un build de `dev` y un release tageado son indistinguibles mirando el
+equipo — cosa que importa desde que el trabajo va en `dev` y `main` guarda las
+versiones. Se deriva de git a propósito: una constante escrita a mano se
+desactualiza sola.
 
 ## OTA: cargar firmware por red
 

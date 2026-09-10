@@ -32,8 +32,9 @@
  * data/config.json, subido aparte con `pio run -t uploadfs`, no compilada en
  * el firmware -- ver src/config.h. El portal web (src/portal.h) sirve una UI
  * en /www/index.html (misma carpeta data/, mismo uploadfs) para editarla sin
- * SSH ni recompilar, mas un modal de ajustes (hostname/volumen, en
- * settings.json via src/settings.h) y un monitor de actividad en vivo que
+ * SSH ni recompilar, mas un modal de ajustes (SSID, hostname, volumen, largo
+ * y colores de la tira, en settings.json via src/settings.h) y un monitor de
+ * actividad en vivo que
  * lee del mismo buffer que usa el logger (src/log.h) para el monitor serie.
  * El portal corre en un Access Point propio (ver src/portal.cpp) y se apaga
  * solo a los 60 minutos del boot.
@@ -66,9 +67,11 @@
  * Cada PN532 debe estar en modo I2C por hardware (DIP switches, jumper, o el
  * mecanismo que use tu placa concreta -- no todas usan el mismo esquema).
  *
- * Tira WS2812 (indicacion visual) en GPIO47 -- ver src/leds.h. Efecto IDLE
- * por ahora (glow verde continuo); pensado para sumar mas efectos despues sin
- * tocar main.cpp.
+ * Tira WS2812 (indicacion visual) en GPIO47 -- ver src/leds.h. Tres estados,
+ * elegidos por prioridad al final de loop(): glow de reposo si no hay nada
+ * puesto, un color fijo apenas aparece un tag, y otro mientras se cuenta una
+ * historia. Los tres colores y el largo de la tira salen de settings.json y
+ * se cambian en caliente desde el portal.
  */
 
 #include <Adafruit_PN532.h>
@@ -98,6 +101,12 @@
 // --- DFPlayer Mini: Serial1 (UART1), 9600 baudios ---------------------------
 #define DFPLAYER_RX 17 // ESP recibe  <- TX del DFPlayer
 #define DFPLAYER_TX 18 // ESP transmite -> RX del DFPlayer
+
+// La define scripts/version.py desde `git describe` en cada compilacion. El
+// fallback es para builds fuera de un repo git, no para uso normal.
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "desconocida"
+#endif
 
 // Timeout corto en readPassiveTargetID(): sin esto, la libreria usa
 // timeout=0 ("bloquear para siempre" -- ver Adafruit_PN532.h). Con dos
@@ -159,6 +168,28 @@ static EstadoLector estado2;
 // la historia de nuevo.
 static bool comboYaDisparada = false;
 
+// true desde que empieza a contarse una historia hasta que cambia lo que hay
+// puesto en los lectores. Cuentan las dos clases de historia -- el cuento de
+// la pareja y el pistaSolo de un personaje -- pero NO el aviso generico de
+// espera: ese dice "pone el otro personaje", no narra nada, asi que la tira
+// se queda en el color de detectado mientras suena.
+//
+// Es lo mas cerca de "esta sonando" que se puede saber sin leerle el estado
+// busy al DFPlayer, cosa que el firmware no hace: el ambar dura hasta que se
+// retira el personaje, no hasta que termina el mp3. Decision explicita.
+static bool historiaSonando = false;
+
+// Que habia puesto en cada lector la vuelta anterior. Sirve para apagar
+// historiaSonando SOLO cuando cambia la presencia de tags.
+//
+// Esto reemplaza a un `historiaSonando = false` que estaba en la rama de "no hay
+// pareja": como esa rama corre en CADA vuelta cuando hay un solo personaje, y
+// esta antes del bloque que dispara el aviso de espera, apagaba el flag una
+// vuelta despues de encenderlo. El ambar duraba una sola iteracion y volvia a
+// cian sin que se llegara a ver, porque el fade dura 800 ms.
+static int presenciaPrevia1 = PERSONAJE_VACIO;
+static int presenciaPrevia2 = PERSONAJE_VACIO;
+
 // Espera en dos etapas cuando queda un solo lector ocupado (personaje
 // reconocido o no): primero un audio generico ("pone el otro personaje"),
 // y si sigue solo mas tiempo, el audio "solitario" especifico de ESE
@@ -218,19 +249,25 @@ static void actualizarLector(Adafruit_PN532 &pn532, bool activo, EstadoLector &e
   }
 }
 
-// Puente hacia el portal: le permite aplicar un volumen nuevo al DFPlayer
-// sin que src/portal.cpp tenga que incluir la libreria del DFPlayer.
-static void aplicarVolumen(uint8_t v) {
+// Puente hacia el portal: aplica al hardware los ajustes que se guardaron
+// desde el modal, sin que src/portal.cpp tenga que conocer ni la libreria del
+// DFPlayer ni la de la tira.
+static void aplicarAjustes(const Settings &s) {
   if (dfPlayer_ok) {
-    dfPlayer.volume(v);
+    dfPlayer.volume(s.volumen);
   }
+  setLargoTira(s.largoTira);
+  setColoresLed(colorDeHex(s.colorIdle, 0x00B200), colorDeHex(s.colorDetectado, 0x80FFFF),
+                colorDeHex(s.colorReproduciendo, 0xFFA000));
 }
 
 void setup() {
   Serial.begin(115200);
   while (!Serial) {
   }
-  logln("Inicializando sistema de historias...");
+  // Primera linea del log a proposito: el buffer circular es de 40 lineas, y
+  // asi la version queda arriba de todo cuando se lee el arranque del portal.
+  logf("Firmware %s -- inicializando sistema de historias...", FIRMWARE_VERSION);
 
   cargarConfiguracion();
   Settings settings = cargarSettings();
@@ -271,8 +308,10 @@ void setup() {
     logln("DFPlayer Mini: no responde por Serial1 (GPIO17/18).");
   }
 
-  iniciarLeds();
-  iniciarPortal(aplicarVolumen);
+  iniciarLeds(settings.largoTira, colorDeHex(settings.colorIdle, 0x00B200),
+              colorDeHex(settings.colorDetectado, 0x80FFFF),
+              colorDeHex(settings.colorReproduciendo, 0xFFA000));
+  iniciarPortal(aplicarAjustes);
   iniciarOTA(settings.hostname.c_str()); // despues del portal: necesita el WiFi arriba
 }
 
@@ -306,6 +345,16 @@ void loop() {
   // reconocida o no -- fisicamente hay algo en ese lector de todos modos.
   bool exactamenteUnoPresente = (!p1Vacio) != (!p2Vacio); // XOR
 
+  // Unico lugar que apaga historiaSonando: cambio lo que hay puesto, asi que la
+  // pista que estuviera sonando ya no corresponde a la situacion. Va ANTES de
+  // los bloques que disparan audio, para que lo que se dispare mas abajo en
+  // esta misma vuelta sobreviva.
+  if (estado1.personajeId != presenciaPrevia1 || estado2.personajeId != presenciaPrevia2) {
+    presenciaPrevia1 = estado1.personajeId;
+    presenciaPrevia2 = estado2.personajeId;
+    historiaSonando = false;
+  }
+
   if (ambosConocidos && !comboYaDisparada) {
     int pista = pistaDePersonajes(estado1.personajeId, estado2.personajeId);
     if (pista != 0) {
@@ -314,6 +363,7 @@ void loop() {
       if (dfPlayer_ok) {
         dfPlayer.playMp3Folder(pista);
       }
+      historiaSonando = true;
     } else {
       logf(">>> %s + %s: combinacion sin historia asociada.", nombreDePersonaje(estado1.personajeId),
            nombreDePersonaje(estado2.personajeId));
@@ -343,6 +393,9 @@ void loop() {
       if (dfPlayer_ok) {
         dfPlayer.playMp3Folder(PISTA_ESPERAR);
       }
+      // NO enciende historiaSonando: esto es un aviso ("pone el otro
+      // personaje"), no una historia. La tira se queda en el color de
+      // detectado hasta que empiece a contarse algo de verdad.
       esperarYaDisparado = true;
     }
 
@@ -355,6 +408,7 @@ void loop() {
         if (dfPlayer_ok) {
           dfPlayer.playMp3Folder(pista);
         }
+        historiaSonando = true;
       } else {
         logf(">>> %s sigue solo hace %lu s: sin pistaSolo configurada.", nombreDePersonaje(idSolo),
              TIEMPO_SOLITARIO_MS / 1000);
@@ -365,5 +419,24 @@ void loop() {
     soloDesde = 0;
     esperarYaDisparado = false;
     soloYaDisparado = false;
+  }
+
+  // Estado de la tira, por prioridad. Va al final de loop() a proposito: asi
+  // ve los audios que se acaban de disparar arriba en esta misma vuelta, en
+  // vez de reaccionar recien en la siguiente.
+  //
+  //   suena algo          -> color de reproduccion
+  //   hay algo puesto     -> color de detectado (reconocido o no: fisicamente
+  //                          hay un tag, y merece devolucion visual igual)
+  //   no hay nada         -> glow de reposo
+  //
+  // setEfectoLed() es idempotente, asi que esto corre en cada vuelta sin
+  // condiciones y sin costo.
+  if (historiaSonando) {
+    setEfectoLed(EFECTO_REPRODUCIENDO);
+  } else if (!p1Vacio || !p2Vacio) {
+    setEfectoLed(EFECTO_DETECTADO);
+  } else {
+    setEfectoLed(EFECTO_IDLE);
   }
 }
